@@ -84,7 +84,9 @@ def detect_watermark_box(img, red):
 
 
 def detect_plate_box(img, red):
-    """Largest red blob in the lower half — the grille plate."""
+    """Largest PLATE-SHAPED red blob in the lower half — the dealer plate.
+    Size/aspect constrained so a red car panel is never mistaken for a plate
+    (otherwise inpainting would carve into the vehicle)."""
     H, W = img.shape[:2]
     low = red.copy()
     low[:int(H * 0.45), :] = 0
@@ -94,23 +96,37 @@ def detect_plate_box(img, red):
     i = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
     if st[i, cv2.CC_STAT_AREA] < 500:
         return None
-    return (int(st[i, cv2.CC_STAT_LEFT]), int(st[i, cv2.CC_STAT_TOP]),
-            int(st[i, cv2.CC_STAT_WIDTH]), int(st[i, cv2.CC_STAT_HEIGHT]))
+    x, y, w, h = (int(st[i, cv2.CC_STAT_LEFT]), int(st[i, cv2.CC_STAT_TOP]),
+                  int(st[i, cv2.CC_STAT_WIDTH]), int(st[i, cv2.CC_STAT_HEIGHT]))
+    # A plate is small and wide. Reject car-panel-sized/shaped blobs so we never
+    # inpaint into the vehicle (e.g. a red-bodied car fills the lower half).
+    if not (0.03 * W <= w <= 0.28 * W and 0.02 * H <= h <= 0.12 * H and 1.3 <= w / max(h, 1) <= 6.0):
+        return None
+    return (x, y, w, h)
 
 
-def build_mask(img, red, wm_box, plate_box):
+def build_mask(img, red, wm_box, plate_box, full=False):
+    """Pixels to inpaint. full=True (clean-only mode) removes the ENTIRE watermark
+    and plate boxes → a clean surface. full=False targets just the marks (watermark
+    strokes / plate text) so a pasted logo covers the rest."""
     H, W = img.shape[:2]
     mask = np.zeros((H, W), np.uint8)
     if wm_box:
         x0, y0, x1, y1 = wm_box
-        wm = red[y0:y1, x0:x1].copy()
-        wm = cv2.dilate(wm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=2)
-        mask[y0:y1, x0:x1] = wm
+        if full:
+            mask[y0:y1, x0:x1] = 255
+        else:
+            wm = red[y0:y1, x0:x1].copy()
+            wm = cv2.dilate(wm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=2)
+            mask[y0:y1, x0:x1] = wm
     if plate_box:
         px, py, pw, ph = plate_box
-        rs = cv2.cvtColor(img[py:py + ph, px:px + pw], cv2.COLOR_BGR2HSV)
-        white = ((rs[:, :, 1] < 80) & (rs[:, :, 2] > 140)).astype(np.uint8) * 255
-        mask[py:py + ph, px:px + pw] = cv2.bitwise_or(mask[py:py + ph, px:px + pw], white)
+        if full:
+            mask[py:py + ph, px:px + pw] = 255
+        else:
+            rs = cv2.cvtColor(img[py:py + ph, px:px + pw], cv2.COLOR_BGR2HSV)
+            white = ((rs[:, :, 1] < 80) & (rs[:, :, 2] > 140)).astype(np.uint8) * 255
+            mask[py:py + ph, px:px + pw] = cv2.bitwise_or(mask[py:py + ph, px:px + pw], white)
     return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=2)
 
 
@@ -158,7 +174,7 @@ def rebrand(img, logo, method="lama", paste_logo=True):
     if not wm_box and not plate_box:
         return img, info  # nothing detected; return unchanged
 
-    mask = build_mask(img, red, wm_box, plate_box)
+    mask = build_mask(img, red, wm_box, plate_box, full=not paste_logo)
     out = inpaint(img, mask, method=method)
 
     if paste_logo:

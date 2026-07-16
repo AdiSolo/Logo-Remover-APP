@@ -32,6 +32,10 @@ import storage
 app = FastAPI(title="Car Image Rebrand API", version="1.0")
 LOGO = core.load_logo()
 
+# Bump when the cleaning algorithm changes so hosted-output cache keys refresh
+# (otherwise an improved result would collide with the old cached image).
+ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "2")
+
 # Optional API-key auth: set REBRAND_API_KEY in the environment to require it.
 API_KEY = os.environ.get("REBRAND_API_KEY")
 
@@ -93,7 +97,7 @@ async def rebrand_endpoint(
             raise HTTPException(status_code=503, detail="hosting not configured (set STORAGE_* env)")
         if not url:
             raise HTTPException(status_code=400, detail="output=url requires a 'url' input")
-        seed = f"{url}|{method}|{format}|{logo}"
+        seed = f"{url}|{method}|{format}|{logo}|v{ALGO_VERSION}"
         key = storage.make_key(seed, format)
         if storage.exists(key):
             return JSONResponse({"url": storage.public_url(key), "cached": True})
