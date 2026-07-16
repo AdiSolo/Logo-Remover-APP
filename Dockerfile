@@ -17,7 +17,7 @@ RUN python -c "from iopaint.download import cli_download_model; cli_download_mod
      curl -L -o /root/.cache/torch/hub/checkpoints/big-lama.pt \
        https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt)
 
-COPY rebrand_core.py api.py ./
+COPY rebrand_core.py api.py storage.py ./
 COPY assets ./assets
 
 ENV REBRAND_DEVICE=cpu \
