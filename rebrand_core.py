@@ -105,23 +105,26 @@ def detect_plate_box(img, red):
     return (x, y, w, h)
 
 
-def build_mask(img, red, wm_box, plate_box, full=False):
-    """Pixels to inpaint. full=True (clean-only mode) removes the ENTIRE watermark
-    and plate boxes → a clean surface. full=False targets just the marks (watermark
-    strokes / plate text) so a pasted logo covers the rest."""
+def build_mask(img, red, wm_box, plate_box, full_plate=False):
+    """Pixels to inpaint.
+
+    Watermark: ALWAYS targeted to the red/orange stroke pixels only (never the whole
+    box) — the watermark box can overlap the top of the car, so a full-box fill would
+    erase the roof. Masking only the coloured strokes removes the text safely.
+
+    Plate: full_plate=True (clean-only mode) removes the ENTIRE plate box → a clean
+    bumper. Otherwise only the white text is removed (so a pasted logo covers the rest).
+    The plate box is size/shape-guarded upstream, so a full fill can't eat the car."""
     H, W = img.shape[:2]
     mask = np.zeros((H, W), np.uint8)
     if wm_box:
         x0, y0, x1, y1 = wm_box
-        if full:
-            mask[y0:y1, x0:x1] = 255
-        else:
-            wm = red[y0:y1, x0:x1].copy()
-            wm = cv2.dilate(wm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=2)
-            mask[y0:y1, x0:x1] = wm
+        wm = red[y0:y1, x0:x1].copy()
+        wm = cv2.dilate(wm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)), iterations=2)
+        mask[y0:y1, x0:x1] = wm
     if plate_box:
         px, py, pw, ph = plate_box
-        if full:
+        if full_plate:
             mask[py:py + ph, px:px + pw] = 255
         else:
             rs = cv2.cvtColor(img[py:py + ph, px:px + pw], cv2.COLOR_BGR2HSV)
@@ -174,7 +177,7 @@ def rebrand(img, logo, method="lama", paste_logo=True):
     if not wm_box and not plate_box:
         return img, info  # nothing detected; return unchanged
 
-    mask = build_mask(img, red, wm_box, plate_box, full=not paste_logo)
+    mask = build_mask(img, red, wm_box, plate_box, full_plate=not paste_logo)
     out = inpaint(img, mask, method=method)
 
     if paste_logo:
