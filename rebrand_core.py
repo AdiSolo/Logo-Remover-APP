@@ -67,20 +67,70 @@ def _red_mask(img):
     return (((h < 20) | (h > 165)) & (s > 60) & (v > 60)).astype(np.uint8) * 255
 
 
+# Known "Trust Encar" watermark variants (assets/logos-to-remove/*.png), loaded
+# once and matched against dark-background photos where colour detection can't help.
+_WM_TMPLS = None
+
+
+def _wm_templates():
+    global _WM_TMPLS
+    if _WM_TMPLS is None:
+        _WM_TMPLS = []
+        d = os.path.join(ASSET_DIR, "logos-to-remove")
+        if os.path.isdir(d):
+            for fn in sorted(os.listdir(d)):
+                if fn.lower().endswith((".png", ".jpg", ".jpeg")):
+                    t = cv2.imread(os.path.join(d, fn), cv2.IMREAD_GRAYSCALE)
+                    if t is not None:
+                        _WM_TMPLS.append(t)
+    return _WM_TMPLS
+
+
+def _match_watermark_topright(img, min_score=0.62):
+    """Locate the watermark by matching known logo templates in the top-right region.
+    Returns a box only on a HIGH-confidence match — low scores mislocalise onto the
+    car, so we'd rather skip (leave a faint mark) than risk inpainting the vehicle."""
+    tmpls = _wm_templates()
+    if not tmpls:
+        return None
+    H, W = img.shape[:2]
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    x0, y1 = int(0.42 * W), int(0.45 * H)  # watermark always sits in the top-right
+    sub = g[0:y1, x0:W]
+    best = None
+    for t in tmpls:
+        th, tw = t.shape
+        tf = t.astype(np.float32)
+        for s in np.linspace(0.30, 1.20, 16):
+            w, h = int(tw * s), int(th * s)
+            if w < 40 or h < 20 or w >= sub.shape[1] or h >= sub.shape[0]:
+                continue
+            r = cv2.matchTemplate(sub, cv2.resize(tf, (w, h)), cv2.TM_CCOEFF_NORMED)
+            _, mx, _, loc = cv2.minMaxLoc(r)
+            if best is None or mx > best[0]:
+                best = (mx, (loc[0] + x0, loc[1]), w, h)
+    if best and best[0] >= min_score:
+        _, loc, w, h = best
+        return (loc[0], loc[1], loc[0] + w, loc[1] + h)
+    return None
+
+
 def detect_watermark_box(img, red):
-    """Bounding box of the red watermark strokes in the top 30% (excludes stickers)."""
+    """Locate the 'Trust Encar' watermark. Colour path (red/orange strokes, top 30%)
+    handles light-background photos reliably; if that finds nothing (dark backgrounds
+    with a white/grey watermark), fall back to high-confidence template matching."""
     H, W = img.shape[:2]
     top = red.copy()
     top[int(H * 0.30):, :] = 0
     n, _, st, _ = cv2.connectedComponentsWithStats(top)
     keep = [i for i in range(1, n) if st[i, cv2.CC_STAT_AREA] > 150]
-    if not keep:
-        return None
-    xs = [st[i, cv2.CC_STAT_LEFT] for i in keep] + [st[i, cv2.CC_STAT_LEFT] + st[i, cv2.CC_STAT_WIDTH] for i in keep]
-    ys = [st[i, cv2.CC_STAT_TOP] for i in keep] + [st[i, cv2.CC_STAT_TOP] + st[i, cv2.CC_STAT_HEIGHT] for i in keep]
-    pad = 22
-    return (int(max(0, min(xs) - pad)), int(max(0, min(ys) - pad)),
-            int(min(W, max(xs) + pad)), int(min(H, max(ys) + pad)))
+    if keep:
+        xs = [st[i, cv2.CC_STAT_LEFT] for i in keep] + [st[i, cv2.CC_STAT_LEFT] + st[i, cv2.CC_STAT_WIDTH] for i in keep]
+        ys = [st[i, cv2.CC_STAT_TOP] for i in keep] + [st[i, cv2.CC_STAT_TOP] + st[i, cv2.CC_STAT_HEIGHT] for i in keep]
+        pad = 22
+        return (int(max(0, min(xs) - pad)), int(max(0, min(ys) - pad)),
+                int(min(W, max(xs) + pad)), int(min(H, max(ys) + pad)))
+    return _match_watermark_topright(img)
 
 
 def detect_plate_box(img, red):
@@ -119,9 +169,21 @@ def build_mask(img, red, wm_box, plate_box, full_plate=False):
     mask = np.zeros((H, W), np.uint8)
     if wm_box:
         x0, y0, x1, y1 = wm_box
-        wm = red[y0:y1, x0:x1].copy()
-        wm = cv2.dilate(wm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)), iterations=2)
-        mask[y0:y1, x0:x1] = wm
+        # Polarity-agnostic: mask pixels that differ from the local background (the
+        # watermark text, red OR white), keeping only text-sized components so a car
+        # panel/roof caught in the box is never inpainted.
+        reg = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        bg = int(np.median(reg))
+        txt = (np.abs(reg.astype(np.int16) - bg) > 35).astype(np.uint8) * 255
+        nn, lab, stt, _ = cv2.connectedComponentsWithStats(txt)
+        area_box = reg.shape[0] * reg.shape[1]
+        keepm = np.zeros_like(txt)
+        for i in range(1, nn):
+            a = stt[i, cv2.CC_STAT_AREA]
+            if 8 <= a <= 0.20 * area_box:  # text strokes/letters; drop large solids (car)
+                keepm[lab == i] = 255
+        keepm = cv2.dilate(keepm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=2)
+        mask[y0:y1, x0:x1] = keepm
     if plate_box:
         px, py, pw, ph = plate_box
         if full_plate:
