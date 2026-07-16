@@ -174,7 +174,7 @@ def build_mask(img, red, wm_box, plate_box, full_plate=False):
         # panel/roof caught in the box is never inpainted.
         reg = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
         bg = int(np.median(reg))
-        txt = (np.abs(reg.astype(np.int16) - bg) > 35).astype(np.uint8) * 255
+        txt = (np.abs(reg.astype(np.int16) - bg) > 30).astype(np.uint8) * 255
         nn, lab, stt, _ = cv2.connectedComponentsWithStats(txt)
         area_box = reg.shape[0] * reg.shape[1]
         keepm = np.zeros_like(txt)
@@ -182,8 +182,15 @@ def build_mask(img, red, wm_box, plate_box, full_plate=False):
             a = stt[i, cv2.CC_STAT_AREA]
             if 8 <= a <= 0.20 * area_box:  # text strokes/letters; drop large solids (car)
                 keepm[lab == i] = 255
-        keepm = cv2.dilate(keepm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=2)
-        mask[y0:y1, x0:x1] = keepm
+        ys, xs = np.where(keepm > 0)
+        if len(xs):
+            # Inpaint the SOLID bounding box of the text (it sits on smooth background,
+            # above the roofline — car panels were excluded above). A contiguous fill
+            # reconstructs the gradient cleanly, avoiding the thin-stroke "ghost".
+            pad = 8
+            rx0, rx1 = max(0, int(xs.min()) - pad), min(reg.shape[1], int(xs.max()) + pad)
+            ry0, ry1 = max(0, int(ys.min()) - pad), min(reg.shape[0], int(ys.max()) + pad)
+            mask[y0 + ry0:y0 + ry1, x0 + rx0:x0 + rx1] = 255
     if plate_box:
         px, py, pw, ph = plate_box
         if full_plate:
