@@ -115,10 +115,54 @@ def _match_watermark_topright(img, min_score=0.62):
     return None
 
 
+# Optional trained detector (assets/wm_detector.pt). Preferred when present; the
+# heuristic below is the fallback so the tool works with or without the model.
+_WM_MODEL = None
+
+
+def _wm_model():
+    global _WM_MODEL
+    if _WM_MODEL is None:
+        p = os.path.join(ASSET_DIR, "wm_detector.pt")
+        if os.path.exists(p):
+            try:
+                from ultralytics import YOLO
+                _WM_MODEL = YOLO(p)
+            except Exception as e:
+                print(f"[wm] could not load detector: {e}")
+                _WM_MODEL = False
+        else:
+            _WM_MODEL = False
+    return _WM_MODEL
+
+
+def _detect_watermark_ml(img, conf=0.35):
+    m = _wm_model()
+    if not m:
+        return None
+    try:
+        res = m.predict(img, conf=conf, verbose=False)[0]
+    except Exception:
+        return None
+    best = None
+    for b in res.boxes:
+        if int(b.cls) == 0:  # watermark
+            c = float(b.conf)
+            if best is None or c > best[0]:
+                best = (c, [int(v) for v in b.xyxy[0].tolist()])
+    if best:
+        x0, y0, x1, y1 = best[1]
+        return (x0, y0, x1, y1)
+    return None
+
+
 def detect_watermark_box(img, red):
-    """Locate the 'Trust Encar' watermark. Colour path (red/orange strokes, top 30%)
-    handles light-background photos reliably; if that finds nothing (dark backgrounds
-    with a white/grey watermark), fall back to high-confidence template matching."""
+    """Locate the 'Trust Encar' watermark. Prefer the trained detector if present;
+    otherwise use the heuristic: colour path (red/orange strokes, top 30%) for light
+    backgrounds, then high-confidence template matching for dark backgrounds."""
+    ml = _detect_watermark_ml(img)
+    if ml is not None:
+        return ml
     H, W = img.shape[:2]
     top = red.copy()
     top[int(H * 0.30):, :] = 0
