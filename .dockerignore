@@ -1,0 +1,10 @@
+.venv
+.venv-lama
+images_in
+images_out
+preview
+*.md
+__pycache__
+*.pyc
+.DS_Store
+logo_template.png

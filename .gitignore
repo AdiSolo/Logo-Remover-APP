@@ -1,0 +1,33 @@
+# Python virtualenvs (huge — torch/iopaint live here; recreate via requirements.txt)
+.venv/
+.venv-lama/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Test image I/O (not source)
+images_in/
+images_out/
+preview/
+
+# Local secrets / env
+.env
+.env.*
+!.env.example
+
+# Models downloaded at build/first-run (baked into the Docker image instead)
+*.pt
+*.ckpt
+*.safetensors
+.cache/
+
+# OS / editor
+.DS_Store
+*.log
