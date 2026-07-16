@@ -34,7 +34,7 @@ LOGO = core.load_logo()
 
 # Bump when the cleaning algorithm changes so hosted-output cache keys refresh
 # (otherwise an improved result would collide with the old cached image).
-ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "5")
+ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "6")
 
 # Optional API-key auth: set REBRAND_API_KEY in the environment to require it.
 API_KEY = os.environ.get("REBRAND_API_KEY")

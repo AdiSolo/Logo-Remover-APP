@@ -182,15 +182,33 @@ def build_mask(img, red, wm_box, plate_box, full_plate=False):
             a = stt[i, cv2.CC_STAT_AREA]
             if 8 <= a <= 0.20 * area_box:  # text strokes/letters; drop large solids (car)
                 keepm[lab == i] = 255
-        ys, xs = np.where(keepm > 0)
-        if len(xs):
-            # Inpaint the SOLID bounding box of the text (it sits on smooth background,
-            # above the roofline — car panels were excluded above). A contiguous fill
-            # reconstructs the gradient cleanly, avoiding the thin-stroke "ghost".
-            pad = 8
-            rx0, rx1 = max(0, int(xs.min()) - pad), min(reg.shape[1], int(xs.max()) + pad)
-            ry0, ry1 = max(0, int(ys.min()) - pad), min(reg.shape[0], int(ys.max()) + pad)
-            mask[y0 + ry0:y0 + ry1, x0 + rx0:x0 + rx1] = 255
+        # Isolate the DOMINANT text band (the watermark) via a row projection, so an
+        # isolated element lower in the box (e.g. a red windshield sticker) or the
+        # windshield itself is excluded — filling it would hallucinate an artifact.
+        rows = (keepm > 0).sum(axis=1).astype(np.float32)
+        if rows.max() > 0:
+            rthr = rows.max() * 0.15
+            active = rows >= rthr
+            best = (0, 0)
+            cur = None
+            for yy in range(len(active)):
+                if active[yy]:
+                    cur = yy if cur is None else cur
+                elif cur is not None:
+                    if yy - cur > best[1] - best[0]:
+                        best = (cur, yy)
+                    cur = None
+            if cur is not None and len(active) - cur > best[1] - best[0]:
+                best = (cur, len(active))
+            ry0, ry1 = best
+            band = keepm[ry0:ry1]
+            cols = (band > 0).sum(axis=0).astype(np.float32)
+            if cols.max() > 0:
+                xs = np.where(cols >= cols.max() * 0.05)[0]
+                pad = 8
+                rx0, rx1 = max(0, int(xs.min()) - pad), min(reg.shape[1], int(xs.max()) + pad)
+                fy0, fy1 = max(0, ry0 - pad), min(reg.shape[0], ry1 + pad)
+                mask[y0 + fy0:y0 + fy1, x0 + rx0:x0 + rx1] = 255
     if plate_box:
         px, py, pw, ph = plate_box
         if full_plate:
