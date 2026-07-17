@@ -156,10 +156,72 @@ def _detect_watermark_ml(img, conf=0.35):
     return None
 
 
+# Edge-template detector. Matches the "Encar" wordmark by its EDGE structure
+# (polarity-independent → works whether the semi-transparent watermark renders
+# dark-on-light or light-on-dark), then expands the box up/right to also cover the
+# small "Trust" script. This is the primary detector; it is far more reliable across
+# Encar's backgrounds than colour/ML, which missed dark-background watermarks.
+_WM_EDGE_TMPL = None
+# Precision-first cutoff: 0.40 excludes bold dealer signage (e.g. "TOYOTA CERTIFIED"
+# ~0.34) while keeping real watermarks (0.40+). ~63% recall; the faint tail is left
+# untouched (no harm) rather than risking damage to clean/dealer photos.
+WM_EDGE_MIN_SCORE = float(os.environ.get("REBRAND_WM_MIN_SCORE", "0.40"))
+
+
+def _edges(gray):
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    return cv2.normalize(cv2.magnitude(gx, gy), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+
+def _wm_edge_template():
+    """Edge map of the 'Encar' wordmark, cropped from the averaged template asset."""
+    global _WM_EDGE_TMPL
+    if _WM_EDGE_TMPL is None:
+        t = cv2.imread(os.path.join(ASSET_DIR, "wm_template.jpg"), cv2.IMREAD_GRAYSCALE)
+        _WM_EDGE_TMPL = _edges(t[35:105, 80:300]) if t is not None else False
+    return _WM_EDGE_TMPL
+
+
+def _detect_watermark_edge(img):
+    """(score, full_box) — box covers 'Trust Encar', expanded up/right from the
+    'Encar' match. box is None if no template asset or no location found."""
+    tmpl = _wm_edge_template()
+    if tmpl is False:
+        return 0.0, None
+    TH, TW = tmpl.shape
+    H, W = img.shape[:2]
+    ox = int(0.46 * W)
+    roi = img[0:int(0.32 * H), ox:W]
+    if roi.shape[0] < TH or roi.shape[1] < TW:
+        return 0.0, None
+    e = _edges(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY))
+    best, bloc, bs = -1.0, None, 1.0
+    for s in (0.8, 0.9, 1.0, 1.1, 1.25):
+        tw, th = int(TW * s), int(TH * s)
+        if e.shape[0] < th or e.shape[1] < tw:
+            continue
+        r = cv2.matchTemplate(e, cv2.resize(tmpl, (tw, th)), cv2.TM_CCOEFF_NORMED)
+        _, mx, _, ml = cv2.minMaxLoc(r)
+        if mx > best:
+            best, bloc, bs = mx, ml, s
+    if bloc is None:
+        return best, None
+    tw, th = int(TW * bs), int(TH * bs)
+    ex0, ey0 = ox + bloc[0], bloc[1]        # 'Encar' top-left in full image
+    x0 = int(ex0 - 0.15 * tw); x1 = int(ex0 + tw + 0.45 * tw)
+    y0 = int(ey0 - 1.55 * th); y1 = int(ey0 + th + 0.18 * th)
+    return best, (max(0, x0), max(0, y0), min(W, x1), min(H, y1))
+
+
 def detect_watermark_box(img, red):
-    """Locate the 'Trust Encar' watermark. Prefer the trained detector if present;
-    otherwise use the heuristic: colour path (red/orange strokes, top 30%) for light
-    backgrounds, then high-confidence template matching for dark backgrounds."""
+    """Locate the 'Trust Encar' watermark. Primary: edge-template match (precision-
+    first — only returns a box on a confident match, else None so clean/dealer photos
+    are left untouched). Legacy ML/colour/template heuristic is the fallback used only
+    when no template asset ships."""
+    if _wm_edge_template() is not False:
+        score, box = _detect_watermark_edge(img)
+        return box if (box is not None and score >= WM_EDGE_MIN_SCORE) else None
     ml = _detect_watermark_ml(img)
     if ml is not None:
         return ml
@@ -214,45 +276,22 @@ def build_mask(img, red, wm_box, plate_box, full_plate=False):
     if wm_box:
         x0, y0, x1, y1 = wm_box
         # Polarity-agnostic: mask pixels that differ from the local background (the
-        # watermark text, red OR white), keeping only text-sized components so a car
-        # panel/roof caught in the box is never inpainted.
+        # watermark strokes, red OR white). Keep ALL text-sized components so BOTH
+        # "Trust" (small script) and "Encar" (bold) are removed — only large solid
+        # components (a car panel/roof caught in the box) are dropped, so the vehicle
+        # is never inpainted. The box comes from the precise edge detector, so it sits
+        # on the top-right watermark; there is no separate windshield element to guard.
         reg = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
         bg = int(np.median(reg))
-        txt = (np.abs(reg.astype(np.int16) - bg) > 30).astype(np.uint8) * 255
+        txt = (np.abs(reg.astype(np.int16) - bg) > 28).astype(np.uint8) * 255
         nn, lab, stt, _ = cv2.connectedComponentsWithStats(txt)
         area_box = reg.shape[0] * reg.shape[1]
         keepm = np.zeros_like(txt)
         for i in range(1, nn):
             a = stt[i, cv2.CC_STAT_AREA]
-            if 8 <= a <= 0.20 * area_box:  # text strokes/letters; drop large solids (car)
+            if 5 <= a <= 0.30 * area_box:  # all watermark strokes; drop large solids (car)
                 keepm[lab == i] = 255
-        # Isolate the DOMINANT text band (the watermark) via a row projection, so an
-        # isolated element lower in the box (e.g. a red windshield sticker) or the
-        # windshield itself is excluded — filling it would hallucinate an artifact.
-        rows = (keepm > 0).sum(axis=1).astype(np.float32)
-        if rows.max() > 0:
-            rthr = rows.max() * 0.15
-            active = rows >= rthr
-            best = (0, 0)
-            cur = None
-            for yy in range(len(active)):
-                if active[yy]:
-                    cur = yy if cur is None else cur
-                elif cur is not None:
-                    if yy - cur > best[1] - best[0]:
-                        best = (cur, yy)
-                    cur = None
-            if cur is not None and len(active) - cur > best[1] - best[0]:
-                best = (cur, len(active))
-            ry0, ry1 = best
-            band = keepm[ry0:ry1]
-            cols = (band > 0).sum(axis=0).astype(np.float32)
-            if cols.max() > 0:
-                xs = np.where(cols >= cols.max() * 0.05)[0]
-                pad = 8
-                rx0, rx1 = max(0, int(xs.min()) - pad), min(reg.shape[1], int(xs.max()) + pad)
-                fy0, fy1 = max(0, ry0 - pad), min(reg.shape[0], ry1 + pad)
-                mask[y0 + fy0:y0 + fy1, x0 + rx0:x0 + rx1] = 255
+        mask[y0:y1, x0:x1] = cv2.bitwise_or(mask[y0:y1, x0:x1], keepm)
     if plate_box:
         px, py, pw, ph = plate_box
         if full_plate:
@@ -261,7 +300,7 @@ def build_mask(img, red, wm_box, plate_box, full_plate=False):
             rs = cv2.cvtColor(img[py:py + ph, px:px + pw], cv2.COLOR_BGR2HSV)
             white = ((rs[:, :, 1] < 80) & (rs[:, :, 2] > 140)).astype(np.uint8) * 255
             mask[py:py + ph, px:px + pw] = cv2.bitwise_or(mask[py:py + ph, px:px + pw], white)
-    return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=2)
+    return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=3)
 
 
 # --------------------------------------------------------------------------

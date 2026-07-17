@@ -34,7 +34,7 @@ LOGO = core.load_logo()
 
 # Bump when the cleaning algorithm changes so hosted-output cache keys refresh
 # (otherwise an improved result would collide with the old cached image).
-ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "7")  # v7: ML watermark detector (wm_detector.pt)
+ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "8")  # v8: edge-template watermark detector + full Trust+Encar mask
 
 # Optional API-key auth: set REBRAND_API_KEY in the environment to require it.
 API_KEY = os.environ.get("REBRAND_API_KEY")
