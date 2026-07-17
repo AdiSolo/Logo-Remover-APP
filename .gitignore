@@ -27,6 +27,9 @@ preview/
 *.ckpt
 *.safetensors
 .cache/
+# Exception: the trained watermark detector has no download source, so it must
+# ship in the repo to reach the VPS build (Dockerfile COPYs assets/ into the image).
+!assets/wm_detector.pt
 
 # OS / editor
 .DS_Store
