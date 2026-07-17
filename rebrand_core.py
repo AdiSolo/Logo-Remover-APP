@@ -291,6 +291,13 @@ def build_mask(img, red, wm_box, plate_box, full_plate=False):
             a = stt[i, cv2.CC_STAT_AREA]
             if 5 <= a <= 0.30 * area_box:  # all watermark strokes; drop large solids (car)
                 keepm[lab == i] = 255
+        # Merge the separate strokes ("Trust" + "Encar") into ONE solid patch. A thin
+        # stroke-shaped mask makes LaMa fill many disjoint slivers and leaves faint
+        # coloured residue on smooth studio walls; a single contiguous region fills
+        # cleanly. Large solids (the car) were already dropped above, so closing/
+        # dilating here can't grow onto the vehicle.
+        keepm = cv2.morphologyEx(keepm, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
+        keepm = cv2.dilate(keepm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=2)
         mask[y0:y1, x0:x1] = cv2.bitwise_or(mask[y0:y1, x0:x1], keepm)
     if plate_box:
         px, py, pw, ph = plate_box
