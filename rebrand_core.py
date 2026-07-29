@@ -151,16 +151,22 @@ def _detect_watermark_ml(img, conf=None):
         res = m.predict(img, conf=conf, verbose=False)[0]
     except Exception:
         return None
+    H, W = img.shape[:2]
     best = None
     for b in res.boxes:
-        if int(b.cls) == 0:  # watermark
-            c = float(b.conf)
-            if best is None or c > best[0]:
-                best = (c, [int(v) for v in b.xyxy[0].tolist()])
-    if best:
-        x0, y0, x1, y1 = best[1]
-        return (x0, y0, x1, y1)
-    return None
+        if int(b.cls) != 0:  # only the watermark class
+            continue
+        x0, y0, x1, y1 = [int(v) for v in b.xyxy[0].tolist()]
+        # The 'Trust Encar' watermark is ALWAYS top-right and fixed-position. Reject
+        # boxes elsewhere (a dealer's own centre/left logo text) so clean dealer photos
+        # are never inpainted/smudged — precision matters far more than one extra catch.
+        cx = (x0 + x1) / 2
+        if cx < 0.45 * W or y0 > 0.40 * H:
+            continue
+        c = float(b.conf)
+        if best is None or c > best[0]:
+            best = (c, (x0, y0, x1, y1))
+    return best[1] if best else None
 
 
 # Edge-template detector. Matches the "Encar" wordmark by its EDGE structure
