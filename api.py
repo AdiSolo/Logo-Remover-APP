@@ -34,7 +34,7 @@ LOGO = core.load_logo()
 
 # Bump when the cleaning algorithm changes so hosted-output cache keys refresh
 # (otherwise an improved result would collide with the old cached image).
-ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "9")  # v9: solid-patch watermark mask (no residue/smudge on studio bg)
+ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "10")  # v10: trained YOLO v2 detector (union w/ edge backstop) — recovers dark-bg recall
 
 # Optional API-key auth: set REBRAND_API_KEY in the environment to require it.
 API_KEY = os.environ.get("REBRAND_API_KEY")

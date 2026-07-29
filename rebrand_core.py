@@ -136,10 +136,17 @@ def _wm_model():
     return _WM_MODEL
 
 
-def _detect_watermark_ml(img, conf=0.35):
+# Confidence floor for the trained detector. The v2 model is precision-first
+# (val P≈0.97 @ mAP50 0.99), so 0.40 keeps recall high while not firing on the
+# clean/dealer photos that must be left untouched. Tune via env if needed.
+WM_ML_CONF = float(os.environ.get("REBRAND_WM_ML_CONF", "0.40"))
+
+
+def _detect_watermark_ml(img, conf=None):
     m = _wm_model()
     if not m:
         return None
+    conf = WM_ML_CONF if conf is None else conf
     try:
         res = m.predict(img, conf=conf, verbose=False)[0]
     except Exception:
@@ -215,16 +222,19 @@ def _detect_watermark_edge(img):
 
 
 def detect_watermark_box(img, red):
-    """Locate the 'Trust Encar' watermark. Primary: edge-template match (precision-
-    first — only returns a box on a confident match, else None so clean/dealer photos
-    are left untouched). Legacy ML/colour/template heuristic is the fallback used only
-    when no template asset ships."""
-    if _wm_edge_template() is not False:
-        score, box = _detect_watermark_edge(img)
-        return box if (box is not None and score >= WM_EDGE_MIN_SCORE) else None
+    """Locate the 'Trust Encar' watermark. UNION of two precision-guarded detectors:
+      1. trained YOLO model (assets/wm_detector.pt) — high recall, catches the
+         dark-background / faint watermarks the edge matcher missed (~50% recall wall);
+      2. edge-template match — the backstop, used when the model doesn't fire.
+    The model is tried first; on a miss we fall back to the edge match. Both only
+    return a box on a confident detection, so clean/dealer photos stay untouched.
+    The legacy colour heuristic runs only if neither the model nor the template ship."""
     ml = _detect_watermark_ml(img)
     if ml is not None:
         return ml
+    if _wm_edge_template() is not False:
+        score, box = _detect_watermark_edge(img)
+        return box if (box is not None and score >= WM_EDGE_MIN_SCORE) else None
     H, W = img.shape[:2]
     top = red.copy()
     top[int(H * 0.30):, :] = 0
