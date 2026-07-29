@@ -141,6 +141,10 @@ def _wm_model():
 # clean/dealer photos that must be left untouched. Tune via env if needed.
 WM_ML_CONF = float(os.environ.get("REBRAND_WM_ML_CONF", "0.40"))
 
+# Max half-stroke-width (px) a masked component may have before it's treated as a
+# solid car-body intrusion (not watermark text) and dropped. See build_mask.
+WM_MAX_STROKE_HALF = float(os.environ.get("REBRAND_WM_MAX_STROKE_HALF", "12"))
+
 
 def _detect_watermark_ml(img, conf=None):
     m = _wm_model()
@@ -292,38 +296,46 @@ def build_mask(img, red, wm_box, plate_box, full_plate=False):
     if wm_box:
         x0, y0, x1, y1 = wm_box
         # Polarity-agnostic: mask pixels that differ from the local background (the
-        # watermark strokes, red OR white). Keep ALL text-sized components so BOTH
-        # "Trust" (small script) and "Encar" (bold) are removed — only large solid
-        # components (a car panel/roof caught in the box) are dropped, so the vehicle
-        # is never inpainted. The box comes from the precise edge detector, so it sits
-        # on the top-right watermark; there is no separate windshield element to guard.
+        # watermark strokes, red OR white). Keep text-sized STROKES so both "Trust"
+        # (script) and "Encar" (bold) are removed.
         reg = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
         bg = int(np.median(reg))
-        txt = (np.abs(reg.astype(np.int16) - bg) > 28).astype(np.uint8) * 255
+        txt = (np.abs(reg.astype(np.int16) - bg) > 22).astype(np.uint8) * 255
         nn, lab, stt, _ = cv2.connectedComponentsWithStats(txt)
+        # Stroke-thickness gate: watermark glyphs are THIN; a car roof/body that
+        # intrudes into the box bottom is a THICK solid. Dropping components whose peak
+        # half-width exceeds WM_MAX_STROKE_HALF keeps the text but never masks the car —
+        # this is what stops LaMa smearing white paint across a light car on a dark bg.
+        dist = cv2.distanceTransform(txt, cv2.DIST_L2, 3)
         area_box = reg.shape[0] * reg.shape[1]
         keepm = np.zeros_like(txt)
         for i in range(1, nn):
+            comp = lab == i
             a = stt[i, cv2.CC_STAT_AREA]
-            if 5 <= a <= 0.30 * area_box:  # all watermark strokes; drop large solids (car)
-                keepm[lab == i] = 255
-        # Merge the separate strokes ("Trust" + "Encar") into ONE solid patch. A thin
-        # stroke-shaped mask makes LaMa fill many disjoint slivers and leaves faint
-        # coloured residue on smooth studio walls; a single contiguous region fills
-        # cleanly. Large solids (the car) were already dropped above, so closing/
-        # dilating here can't grow onto the vehicle.
-        keepm = cv2.morphologyEx(keepm, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
-        keepm = cv2.dilate(keepm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=2)
+            if a < 5 or a > 0.30 * area_box:
+                continue
+            if float(dist[comp].max()) > WM_MAX_STROKE_HALF:  # thick solid → car, skip
+                continue
+            keepm[comp] = 255
+        # Merge the kept strokes into a contiguous patch so LaMa fills cleanly (a
+        # stroke-thin mask leaves coloured residue on smooth walls). Gentle kernels —
+        # the car was already dropped above, so this can't grow onto the vehicle.
+        keepm = cv2.morphologyEx(keepm, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+        keepm = cv2.dilate(keepm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=1)
         mask[y0:y1, x0:x1] = cv2.bitwise_or(mask[y0:y1, x0:x1], keepm)
     if plate_box:
         px, py, pw, ph = plate_box
+        pm = np.zeros((H, W), np.uint8)
         if full_plate:
-            mask[py:py + ph, px:px + pw] = 255
+            pm[py:py + ph, px:px + pw] = 255
         else:
             rs = cv2.cvtColor(img[py:py + ph, px:px + pw], cv2.COLOR_BGR2HSV)
             white = ((rs[:, :, 1] < 80) & (rs[:, :, 2] > 140)).astype(np.uint8) * 255
-            mask[py:py + ph, px:px + pw] = cv2.bitwise_or(mask[py:py + ph, px:px + pw], white)
-    return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=3)
+            pm[py:py + ph, px:px + pw] = white
+        # The plate box is size/shape-guarded upstream, so it can dilate freely.
+        pm = cv2.dilate(pm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=3)
+        mask = cv2.bitwise_or(mask, pm)
+    return mask
 
 
 # --------------------------------------------------------------------------
