@@ -146,17 +146,32 @@ WM_ML_CONF = float(os.environ.get("REBRAND_WM_ML_CONF", "0.40"))
 WM_MAX_STROKE_HALF = float(os.environ.get("REBRAND_WM_MAX_STROKE_HALF", "12"))
 
 
+# Low internal floor for the initial detection pass: on hard backgrounds (near-white
+# walls, colour-matching gradients) the model often splits ONE watermark into two
+# overlapping boxes — a tight high-confidence box around bold "Encar" plus a looser,
+# lower-confidence box that also spans the "Trust" script above it. Detecting at a
+# low floor lets us see that companion box; WM_ML_CONF still gates whether we act at
+# all (see below).
+WM_ML_DETECT_FLOOR = float(os.environ.get("REBRAND_WM_ML_DETECT_FLOOR", "0.15"))
+
+
+def _boxes_overlap(a, b):
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return not (ax1 <= bx0 or bx1 <= ax0 or ay1 <= by0 or by1 <= ay0)
+
+
 def _detect_watermark_ml(img, conf=None):
     m = _wm_model()
     if not m:
         return None
-    conf = WM_ML_CONF if conf is None else conf
+    conf = WM_ML_DETECT_FLOOR if conf is None else conf
     try:
         res = m.predict(img, conf=conf, verbose=False)[0]
     except Exception:
         return None
     H, W = img.shape[:2]
-    best = None
+    cand = []
     for b in res.boxes:
         if int(b.cls) != 0:  # only the watermark class
             continue
@@ -167,10 +182,24 @@ def _detect_watermark_ml(img, conf=None):
         cx = (x0 + x1) / 2
         if cx < 0.45 * W or y0 > 0.40 * H:
             continue
-        c = float(b.conf)
-        if best is None or c > best[0]:
-            best = (c, (x0, y0, x1, y1))
-    return best[1] if best else None
+        cand.append((float(b.conf), (x0, y0, x1, y1)))
+    if not cand:
+        return None
+    cand.sort(key=lambda c: -c[0])
+    # Require a genuinely confident primary detection (WM_ML_CONF) before acting at
+    # all — this is what keeps dealer signage from ever triggering a clean.
+    if cand[0][0] < WM_ML_CONF:
+        return None
+    px0, py0, px1, py1 = cand[0][1]
+    uy0, uy1 = py0, py1
+    for c, box in cand[1:]:
+        # Only extend the VERTICAL range from an overlapping companion box, keep the
+        # primary (tighter, higher-confidence) horizontal range as-is. Unioning width
+        # too would sweep in extra car surface at the sides on some angles.
+        if _boxes_overlap((px0, py0, px1, py1), box):
+            x0, y0, x1, y1 = box
+            uy0, uy1 = min(uy0, y0), max(uy1, y1)
+    return (px0, uy0, px1, uy1)
 
 
 # Edge-template detector. Matches the "Encar" wordmark by its EDGE structure
@@ -281,6 +310,49 @@ def detect_plate_box(img, red):
     return (x, y, w, h)
 
 
+# Fraction of the watermark box (from the top) treated as the "text zone" — the
+# bold "Encar" + script "Trust" always live here, and a bold, large rendering of
+# the wordmark can have strokes several px thicker than a car body's edge sliver at
+# small scale, so a single global thickness gate can't tell them apart reliably.
+# Below this fraction is the "danger zone", the strip nearest the box's bottom edge
+# where a car roof/body actually can intrude — only there is the strict
+# WM_MAX_STROKE_HALF gate applied. This split removes the whole wordmark cleanly
+# while still refusing to ever mask a car that intrudes from below.
+WM_TEXT_ZONE_FRAC = float(os.environ.get("REBRAND_WM_TEXT_ZONE_FRAC", "0.80"))
+
+
+def _thresh_components(gray, area_cap, max_half):
+    """Components of `gray` differing from local background by >22, area-capped,
+    and (if max_half is set) dropped when their peak half-thickness exceeds it."""
+    bg = int(np.median(gray))
+    txt = (np.abs(gray.astype(np.int16) - bg) > 22).astype(np.uint8) * 255
+    nn, lab, stt, _ = cv2.connectedComponentsWithStats(txt)
+    dist = cv2.distanceTransform(txt, cv2.DIST_L2, 3) if max_half is not None else None
+    keep = np.zeros_like(txt)
+    for i in range(1, nn):
+        a = stt[i, cv2.CC_STAT_AREA]
+        if a < 5 or a > area_cap:
+            continue
+        if max_half is not None and float(dist[lab == i].max()) > max_half:
+            continue
+        keep[lab == i] = 255
+    return keep
+
+
+def _watermark_stroke_mask(reg_gray):
+    """Which pixels of the watermark-box crop to inpaint. Zoned: the top
+    WM_TEXT_ZONE_FRAC is pure text territory (no thickness gate — keep everything
+    stroke-shaped, however bold), the bottom strip is the only place a car body could
+    intrude so it alone gets the strict WM_MAX_STROKE_HALF gate."""
+    RH, RW = reg_gray.shape[:2]
+    area_cap = 0.30 * RW * RH
+    split = int(RH * WM_TEXT_ZONE_FRAC)
+    keepm = np.zeros((RH, RW), np.uint8)
+    keepm[:split] = _thresh_components(reg_gray[:split], area_cap, None)
+    keepm[split:] = _thresh_components(reg_gray[split:], area_cap, WM_MAX_STROKE_HALF)
+    return keepm
+
+
 def build_mask(img, red, wm_box, plate_box, full_plate=False):
     """Pixels to inpaint.
 
@@ -299,24 +371,7 @@ def build_mask(img, red, wm_box, plate_box, full_plate=False):
         # watermark strokes, red OR white). Keep text-sized STROKES so both "Trust"
         # (script) and "Encar" (bold) are removed.
         reg = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
-        bg = int(np.median(reg))
-        txt = (np.abs(reg.astype(np.int16) - bg) > 22).astype(np.uint8) * 255
-        nn, lab, stt, _ = cv2.connectedComponentsWithStats(txt)
-        # Stroke-thickness gate: watermark glyphs are THIN; a car roof/body that
-        # intrudes into the box bottom is a THICK solid. Dropping components whose peak
-        # half-width exceeds WM_MAX_STROKE_HALF keeps the text but never masks the car —
-        # this is what stops LaMa smearing white paint across a light car on a dark bg.
-        dist = cv2.distanceTransform(txt, cv2.DIST_L2, 3)
-        area_box = reg.shape[0] * reg.shape[1]
-        keepm = np.zeros_like(txt)
-        for i in range(1, nn):
-            comp = lab == i
-            a = stt[i, cv2.CC_STAT_AREA]
-            if a < 5 or a > 0.30 * area_box:
-                continue
-            if float(dist[comp].max()) > WM_MAX_STROKE_HALF:  # thick solid → car, skip
-                continue
-            keepm[comp] = 255
+        keepm = _watermark_stroke_mask(reg)
         # Merge the kept strokes into a contiguous patch so LaMa fills cleanly (a
         # stroke-thin mask leaves coloured residue on smooth walls). Gentle kernels —
         # the car was already dropped above, so this can't grow onto the vehicle.
