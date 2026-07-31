@@ -261,14 +261,19 @@ def _detect_watermark_edge(img):
 
 
 # Below this local-background brightness a real "Trust Encar" watermark can render
-# fully achromatic (grey/white on a genuinely dark studio wall) — see
+# fully achromatic (grey/white on a dark-ish studio wall) — see
 # _watermark_color_consistent. Above it, a real watermark reliably keeps its
-# red/orange tint, so the colour check applies.
-WM_DARK_BG_MAX = float(os.environ.get("REBRAND_WM_DARK_BG_MAX", "60"))
+# red/orange tint, so the colour check applies. Calibrated on a 100-photo scan of a
+# real cleaning batch: achromatic renders clustered at bg<=70 (up to a Hyundai
+# Ioniq6 at 69-70), coloured renders started at bg>=152 — a clean gap, so 100 sits
+# safely in the middle with margin on both sides.
+WM_DARK_BG_MAX = float(os.environ.get("REBRAND_WM_DARK_BG_MAX", "100"))
 # Minimum fraction of the kept (text-stroke) pixels that must fall in the red/orange
-# hue range on a light background. Real watermarks measured 0.23-0.40; the one known
-# false positive (blue/grey dealer signage, e.g. "DEUTSCH AUTOWORLD") measured 0.000.
-WM_MIN_RED_FRAC = float(os.environ.get("REBRAND_WM_MIN_RED_FRAC", "0.05"))
+# hue range on a light background. Same 100-photo scan: every genuine light-bg
+# watermark showed >=0.017 (even faint ones); the only exact 0.000 was the known
+# false positive (blue/grey "DEUTSCH AUTOWORLD" dealer signage, twice). 0.01 keeps a
+# safety margin below the real floor while still requiring more than stray-pixel noise.
+WM_MIN_RED_FRAC = float(os.environ.get("REBRAND_WM_MIN_RED_FRAC", "0.01"))
 
 
 def _watermark_color_consistent(img, box):
