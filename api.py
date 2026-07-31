@@ -34,7 +34,7 @@ LOGO = core.load_logo()
 
 # Bump when the cleaning algorithm changes so hosted-output cache keys refresh
 # (otherwise an improved result would collide with the old cached image).
-ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "12")  # v12: box-union detection + zoned mask (full "Trust Encar" removal on hard backgrounds, still smear-safe)
+ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "13")  # v13: colour-consistency gate (rejects non-red/orange text e.g. "DEUTSCH AUTOWORLD" dealer signage)
 
 # Optional API-key auth: set REBRAND_API_KEY in the environment to require it.
 API_KEY = os.environ.get("REBRAND_API_KEY")

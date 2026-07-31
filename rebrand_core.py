@@ -260,6 +260,40 @@ def _detect_watermark_edge(img):
     return best, (max(0, x0), max(0, y0), min(W, x1), min(H, y1))
 
 
+# Below this local-background brightness a real "Trust Encar" watermark can render
+# fully achromatic (grey/white on a genuinely dark studio wall) — see
+# _watermark_color_consistent. Above it, a real watermark reliably keeps its
+# red/orange tint, so the colour check applies.
+WM_DARK_BG_MAX = float(os.environ.get("REBRAND_WM_DARK_BG_MAX", "60"))
+# Minimum fraction of the kept (text-stroke) pixels that must fall in the red/orange
+# hue range on a light background. Real watermarks measured 0.23-0.40; the one known
+# false positive (blue/grey dealer signage, e.g. "DEUTSCH AUTOWORLD") measured 0.000.
+WM_MIN_RED_FRAC = float(os.environ.get("REBRAND_WM_MIN_RED_FRAC", "0.05"))
+
+
+def _watermark_color_consistent(img, box):
+    """Final safety net: on a light background, a real 'Trust Encar' watermark's
+    strokes are reliably red/orange-tinted. Dealer signage in other colours (e.g.
+    "DEUTSCH AUTOWORLD" in blue/grey) can otherwise pass position + shape gating —
+    this catches it by colour instead. Skipped on dark backgrounds, where the real
+    watermark itself can render achromatic (grey/white), so the check would
+    otherwise reject genuine dark-bg detections."""
+    x0, y0, x1, y1 = box
+    reg = img[y0:y1, x0:x1]
+    if reg.size == 0:
+        return False
+    gray = cv2.cvtColor(reg, cv2.COLOR_BGR2GRAY)
+    if int(np.median(gray)) <= WM_DARK_BG_MAX:
+        return True
+    keepm = _watermark_stroke_mask(gray)
+    total = int((keepm > 0).sum())
+    if total == 0:
+        return False
+    red_reg = _red_mask(reg)
+    frac = float(((keepm > 0) & (red_reg > 0)).sum()) / total
+    return frac >= WM_MIN_RED_FRAC
+
+
 def detect_watermark_box(img, red):
     """Locate the 'Trust Encar' watermark. UNION of two precision-guarded detectors:
       1. trained YOLO model (assets/wm_detector.pt) — high recall, catches the
@@ -267,25 +301,34 @@ def detect_watermark_box(img, red):
       2. edge-template match — the backstop, used when the model doesn't fire.
     The model is tried first; on a miss we fall back to the edge match. Both only
     return a box on a confident detection, so clean/dealer photos stay untouched.
-    The legacy colour heuristic runs only if neither the model nor the template ship."""
+    The legacy colour heuristic runs only if neither the model nor the template ship.
+    Every candidate box then passes through _watermark_color_consistent as a final
+    cross-check before being accepted."""
+    box = None
     ml = _detect_watermark_ml(img)
     if ml is not None:
-        return ml
-    if _wm_edge_template() is not False:
-        score, box = _detect_watermark_edge(img)
-        return box if (box is not None and score >= WM_EDGE_MIN_SCORE) else None
-    H, W = img.shape[:2]
-    top = red.copy()
-    top[int(H * 0.30):, :] = 0
-    n, _, st, _ = cv2.connectedComponentsWithStats(top)
-    keep = [i for i in range(1, n) if st[i, cv2.CC_STAT_AREA] > 150]
-    if keep:
-        xs = [st[i, cv2.CC_STAT_LEFT] for i in keep] + [st[i, cv2.CC_STAT_LEFT] + st[i, cv2.CC_STAT_WIDTH] for i in keep]
-        ys = [st[i, cv2.CC_STAT_TOP] for i in keep] + [st[i, cv2.CC_STAT_TOP] + st[i, cv2.CC_STAT_HEIGHT] for i in keep]
-        pad = 22
-        return (int(max(0, min(xs) - pad)), int(max(0, min(ys) - pad)),
-                int(min(W, max(xs) + pad)), int(min(H, max(ys) + pad)))
-    return _match_watermark_topright(img)
+        box = ml
+    elif _wm_edge_template() is not False:
+        score, edge_box = _detect_watermark_edge(img)
+        box = edge_box if (edge_box is not None and score >= WM_EDGE_MIN_SCORE) else None
+    else:
+        H, W = img.shape[:2]
+        top = red.copy()
+        top[int(H * 0.30):, :] = 0
+        n, _, st, _ = cv2.connectedComponentsWithStats(top)
+        keep = [i for i in range(1, n) if st[i, cv2.CC_STAT_AREA] > 150]
+        if keep:
+            xs = [st[i, cv2.CC_STAT_LEFT] for i in keep] + [st[i, cv2.CC_STAT_LEFT] + st[i, cv2.CC_STAT_WIDTH] for i in keep]
+            ys = [st[i, cv2.CC_STAT_TOP] for i in keep] + [st[i, cv2.CC_STAT_TOP] + st[i, cv2.CC_STAT_HEIGHT] for i in keep]
+            pad = 22
+            box = (int(max(0, min(xs) - pad)), int(max(0, min(ys) - pad)),
+                   int(min(W, max(xs) + pad)), int(min(H, max(ys) + pad)))
+        else:
+            box = _match_watermark_topright(img)
+
+    if box is not None and not _watermark_color_consistent(img, box):
+        return None
+    return box
 
 
 def detect_plate_box(img, red):
