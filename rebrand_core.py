@@ -358,46 +358,47 @@ def detect_plate_box(img, red):
     return (x, y, w, h)
 
 
-# Fraction of the watermark box (from the top) treated as the "text zone" — the
+# Fraction of the watermark box (from the top) treated as "text territory" — the
 # bold "Encar" + script "Trust" always live here, and a bold, large rendering of
 # the wordmark can have strokes several px thicker than a car body's edge sliver at
 # small scale, so a single global thickness gate can't tell them apart reliably.
 # Below this fraction is the "danger zone", the strip nearest the box's bottom edge
-# where a car roof/body actually can intrude — only there is the strict
-# WM_MAX_STROKE_HALF gate applied. This split removes the whole wordmark cleanly
-# while still refusing to ever mask a car that intrudes from below.
+# where a car roof/body actually can intrude. A component is only judged by the
+# strict WM_MAX_STROKE_HALF gate if it REACHES the danger zone (its bounding box
+# extends into that strip) — checked on the whole box's connectivity, not on the
+# zone in isolation (an earlier version sliced the image into two zones before
+# finding components, which silently split one physical car-edge intrusion into a
+# gated bottom fragment and an UNGATED top fragment — that ungated sliver survived
+# and LaMa smeared it into a streak; see the Fiat 500 convertible-roof incident).
 WM_TEXT_ZONE_FRAC = float(os.environ.get("REBRAND_WM_TEXT_ZONE_FRAC", "0.80"))
 
 
-def _thresh_components(gray, area_cap, max_half):
-    """Components of `gray` differing from local background by >22, area-capped,
-    and (if max_half is set) dropped when their peak half-thickness exceeds it."""
-    bg = int(np.median(gray))
-    txt = (np.abs(gray.astype(np.int16) - bg) > 22).astype(np.uint8) * 255
+def _watermark_stroke_mask(reg_gray):
+    """Which pixels of the watermark-box crop to inpaint. Components are found
+    ONCE across the whole crop (preserving true connectivity — see note above),
+    then each is judged individually: components that never reach the bottom
+    WM_TEXT_ZONE_FRAC strip are kept regardless of thickness (protects bold
+    "Encar" glyphs, whose letters can fuse into one blob with a thickness spike
+    at the junction); any component whose bounding box reaches that bottom strip
+    is dropped if its peak half-thickness exceeds WM_MAX_STROKE_HALF — a real car
+    edge, wherever it starts, always ends up touching that strip and gets caught."""
+    RH, RW = reg_gray.shape[:2]
+    area_cap = 0.30 * RW * RH
+    split = int(RH * WM_TEXT_ZONE_FRAC)
+    bg = int(np.median(reg_gray))
+    txt = (np.abs(reg_gray.astype(np.int16) - bg) > 22).astype(np.uint8) * 255
     nn, lab, stt, _ = cv2.connectedComponentsWithStats(txt)
-    dist = cv2.distanceTransform(txt, cv2.DIST_L2, 3) if max_half is not None else None
-    keep = np.zeros_like(txt)
+    dist = cv2.distanceTransform(txt, cv2.DIST_L2, 3)
+    keepm = np.zeros_like(txt)
     for i in range(1, nn):
         a = stt[i, cv2.CC_STAT_AREA]
         if a < 5 or a > area_cap:
             continue
-        if max_half is not None and float(dist[lab == i].max()) > max_half:
-            continue
-        keep[lab == i] = 255
-    return keep
-
-
-def _watermark_stroke_mask(reg_gray):
-    """Which pixels of the watermark-box crop to inpaint. Zoned: the top
-    WM_TEXT_ZONE_FRAC is pure text territory (no thickness gate — keep everything
-    stroke-shaped, however bold), the bottom strip is the only place a car body could
-    intrude so it alone gets the strict WM_MAX_STROKE_HALF gate."""
-    RH, RW = reg_gray.shape[:2]
-    area_cap = 0.30 * RW * RH
-    split = int(RH * WM_TEXT_ZONE_FRAC)
-    keepm = np.zeros((RH, RW), np.uint8)
-    keepm[:split] = _thresh_components(reg_gray[:split], area_cap, None)
-    keepm[split:] = _thresh_components(reg_gray[split:], area_cap, WM_MAX_STROKE_HALF)
+        comp = lab == i
+        reaches_danger_zone = (stt[i, cv2.CC_STAT_TOP] + stt[i, cv2.CC_STAT_HEIGHT]) > split
+        if reaches_danger_zone and float(dist[comp].max()) > WM_MAX_STROKE_HALF:
+            continue  # thick AND reaches the car-risk strip -> treat as car, drop
+        keepm[comp] = 255
     return keepm
 
 
