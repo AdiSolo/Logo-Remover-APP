@@ -468,6 +468,34 @@ def inpaint(img, mask, method="lama"):
     return out if (out.ndim == 3 and out.shape[2] == 3) else cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
 
 
+# Max per-channel deviation (from a heavily median-blurred reference) for a pixel
+# to be flagged as speckle noise. See despeckle().
+WM_DESPECKLE_THRESH = float(os.environ.get("REBRAND_WM_DESPECKLE_THRESH", "10"))
+
+
+def despeckle(out, mask):
+    """LaMa occasionally leaves faint multicoloured confetti-like noise on a flat
+    studio background where the watermark used to be (seen on real photos — a
+    Fiat 500 against a plain grey wall). Cleans it up: flag pixels inside `mask`
+    that deviate from a heavily median-blurred version of the inpainted result,
+    then fill just those with OpenCV inpainting (which draws from the surrounding
+    CLEAN pixels, unlike a blur-and-replace which would just smear the same
+    speckle colours around).
+
+    Deliberately NOT dilated beyond `mask` — the watermark box can sit close to
+    the car's silhouette, and reaching even slightly past the mask risks smearing
+    across that edge (confirmed: an outward-dilated version blurred a visible
+    blob onto a car roofline in testing). Restricting strictly to `mask` trades a
+    little speckle at the mask's own edge for a hard guarantee of never touching
+    the vehicle."""
+    blurred = cv2.medianBlur(out, 21)
+    diff = np.abs(out.astype(np.int16) - blurred.astype(np.int16)).max(axis=2)
+    speckle = ((diff > WM_DESPECKLE_THRESH) & (mask > 0)).astype(np.uint8) * 255
+    if not speckle.any():
+        return out
+    return cv2.inpaint(out, speckle, 9, cv2.INPAINT_TELEA)
+
+
 # --------------------------------------------------------------------------
 # Full pipeline
 # --------------------------------------------------------------------------
@@ -488,6 +516,7 @@ def rebrand(img, logo, method="lama", paste_logo=True):
 
     mask = build_mask(img, red, wm_box, plate_box, full_plate=not paste_logo)
     out = inpaint(img, mask, method=method)
+    out = despeckle(out, mask)
 
     if paste_logo:
         if plate_box:

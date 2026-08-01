@@ -34,7 +34,7 @@ LOGO = core.load_logo()
 
 # Bump when the cleaning algorithm changes so hosted-output cache keys refresh
 # (otherwise an improved result would collide with the old cached image).
-ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "15")  # v15: fix zoned mask splitting car-edge intrusions across the zone boundary (Fiat 500 roofline-streak incident)
+ALGO_VERSION = os.environ.get("REBRAND_ALGO_VERSION", "16")  # v16: despeckle pass removes LaMa's residual multicoloured confetti noise on flat backgrounds
 
 # Optional API-key auth: set REBRAND_API_KEY in the environment to require it.
 API_KEY = os.environ.get("REBRAND_API_KEY")
