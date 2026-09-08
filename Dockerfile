@@ -1,7 +1,9 @@
 FROM python:3.11-slim
-# System libs OpenCV needs at runtime (headless build still needs these)
+# System libs OpenCV needs at runtime (headless build still needs these), plus
+# ffmpeg (reel video encoding) and a font with Romanian diacritics (Pillow text
+# overlays on the reel).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libglib2.0-0 libgl1 curl && \
+        libglib2.0-0 libgl1 curl ffmpeg fonts-dejavu-core && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -17,7 +19,7 @@ RUN python -c "from iopaint.download import cli_download_model; cli_download_mod
      curl -L -o /root/.cache/torch/hub/checkpoints/big-lama.pt \
        https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt)
 
-COPY rebrand_core.py api.py storage.py ./
+COPY rebrand_core.py api.py storage.py video_core.py ./
 COPY assets ./assets
 
 ENV REBRAND_DEVICE=cpu \

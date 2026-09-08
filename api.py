@@ -14,19 +14,35 @@ POST /rebrand                     -> clean/rebrand an image
         output=bytes|url          (default: bytes; 'url' hosts the result in
                                    object storage and returns {"url": ...} JSON.
                                    Idempotent per (url,method,format,logo).)
+POST /video                       -> start a reel render job (async)
+        JSON: {"photos": [url, ...], "fields": {brand, model, trim, year,
+               mileage, price, fuel, transmission, body, site_url}}
+        -> 202 {"job_id": ...}. Requires hosting (STORAGE_*) configured.
+GET  /video/{job_id}              -> poll a reel render job
+        -> {"status": "queued"|"processing"|"done"|"error", "url": ..., "error": ...}
+        -> 404 if unknown (e.g. the container restarted mid-render — retry)
 
 Run:
     .venv-lama/bin/uvicorn api:app --host 0.0.0.0 --port 8000
 """
 import hashlib
 import os
+import threading
+import time
+import uuid
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Literal, Optional, TypedDict
+
 import cv2
 import numpy as np
 import urllib.request
-from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, Header, Depends
+from fastapi import BackgroundTasks, FastAPI, UploadFile, File, Form, Query, HTTPException, Header, Depends
 from fastapi.responses import Response, JSONResponse
+from pydantic import BaseModel
 
 import rebrand_core as core
+import video_core
 import storage
 
 app = FastAPI(title="Car Image Rebrand API", version="1.0")
@@ -152,3 +168,105 @@ async def detect_endpoint(file: UploadFile = File(None), url: str = Form(None)):
         "watermark_box": core.detect_watermark_box(img, red),
         "plate_box": core.detect_plate_box(img, red),
     })
+
+
+# ---------------------------------------------------------------------------
+# Reel generation — async job. No queue infra exists in this service (every
+# other endpoint is synchronous request/response); a render takes tens of
+# seconds, far too slow for one HTTP request. Given this is a low-volume,
+# single-admin, on-demand feature — not a batch job — an in-memory job store
+# is the simplest thing that satisfies the requirements: no new infra (no
+# Redis/Celery/SQLite), and losing an in-flight job on a container restart is
+# an accepted tradeoff (the caller just retries; see GET /video/{job_id}'s 404).
+# ---------------------------------------------------------------------------
+
+class VideoJob(TypedDict):
+    status: Literal["queued", "processing", "done", "error"]
+    url: Optional[str]
+    error: Optional[str]
+    created_at: float
+
+
+class VideoFields(BaseModel):
+    brand: str
+    model: str
+    trim: Optional[str] = None
+    year: Optional[int] = None
+    mileage: Optional[str] = None
+    price: Optional[str] = None
+    fuel: Optional[str] = None
+    transmission: Optional[str] = None
+    body: Optional[str] = None
+    site_url: Optional[str] = None
+
+
+class VideoRequest(BaseModel):
+    photos: list[str]
+    fields: VideoFields
+
+
+_VIDEO_JOBS: dict[str, VideoJob] = {}
+_VIDEO_JOBS_LOCK = threading.Lock()
+# Serializes reel renders against each other on this CPU-only box (does not
+# also guard against a concurrent /rebrand LaMa call — accepted v1 tradeoff).
+_VIDEO_SEMAPHORE = threading.Semaphore(1)
+_VIDEO_JOB_TTL_SECONDS = 2 * 60 * 60
+
+
+def _prune_video_jobs() -> None:
+    cutoff = time.time() - _VIDEO_JOB_TTL_SECONDS
+    with _VIDEO_JOBS_LOCK:
+        stale = [jid for jid, job in _VIDEO_JOBS.items() if job["created_at"] < cutoff]
+        for jid in stale:
+            del _VIDEO_JOBS[jid]
+
+
+def _run_video_job(job_id: str, photos: list[str], fields: dict) -> None:
+    """Runs in a background thread (Starlette's run_in_threadpool via
+    BackgroundTasks — this MUST stay a plain `def`, not `async def`, or it
+    would run inline on the event loop and block every other request, same
+    as /rebrand's already-synchronous behaviour)."""
+    with _VIDEO_JOBS_LOCK:
+        _VIDEO_JOBS[job_id]["status"] = "processing"
+    try:
+        with _VIDEO_SEMAPHORE:
+            with TemporaryDirectory(prefix=f"reel-{job_id}-") as tmp:
+                out_path = video_core.render_reel(photos, fields, Path(tmp))
+                data = out_path.read_bytes()
+                key = storage.make_key(f"{job_id}|v{video_core.VIDEO_ALGO_VERSION}", "mp4")
+                url = storage.upload(key, data, "video/mp4")
+        with _VIDEO_JOBS_LOCK:
+            _VIDEO_JOBS[job_id]["status"] = "done"
+            _VIDEO_JOBS[job_id]["url"] = url
+    except Exception as e:
+        with _VIDEO_JOBS_LOCK:
+            _VIDEO_JOBS[job_id]["status"] = "error"
+            _VIDEO_JOBS[job_id]["error"] = str(e)[-2000:]
+
+
+@app.post("/video", status_code=202)
+async def start_video_endpoint(
+    payload: VideoRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_key),
+):
+    if not storage.is_configured():
+        raise HTTPException(status_code=503, detail="hosting not configured (set STORAGE_* env)")
+    if len(payload.photos) < video_core.MIN_PHOTOS:
+        raise HTTPException(status_code=400, detail=f"at least {video_core.MIN_PHOTOS} photos are required")
+
+    _prune_video_jobs()
+    job_id = uuid.uuid4().hex
+    with _VIDEO_JOBS_LOCK:
+        _VIDEO_JOBS[job_id] = {"status": "queued", "url": None, "error": None, "created_at": time.time()}
+    background_tasks.add_task(_run_video_job, job_id, payload.photos, payload.fields.model_dump())
+    return {"job_id": job_id}
+
+
+@app.get("/video/{job_id}")
+def video_status_endpoint(job_id: str, _auth: None = Depends(require_key)):
+    with _VIDEO_JOBS_LOCK:
+        job = _VIDEO_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown job_id (lost on restart, or never existed)")
+    return {"status": job["status"], "url": job["url"], "error": job["error"]}
