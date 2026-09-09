@@ -97,36 +97,38 @@ def _prepare_frame(src: Path, dest: Path) -> None:
     canvas.save(dest, quality=90)
 
 
-#  Reels/TikTok/Instagram all overlay their OWN chrome (caption, username,
-# sound/share icons) across roughly the bottom 12-15% of a vertical video —
-# text placed at the true bottom edge gets covered once actually posted. Keep
-# everything (including the logo) clear of that zone.
-BOTTOM_SAFE_MARGIN = 220
+# _prepare_frame contain-fits the (consistently ~1160x696, per Encar's own
+# resize params) photo onto the 1080x1920 canvas, centered — so its top/bottom
+# edge is a known constant, not something read per-photo here. Text lives
+# entirely BELOW that edge, in its own solid card, so it never sits on top of
+# the car (the earlier gradient-scrim-over-the-photo design did, and looked
+# like it was competing with the image).
+_ENCAR_PHOTO_W, _ENCAR_PHOTO_H = 1160, 696
+_contain_scale = min(CANVAS[0] / _ENCAR_PHOTO_W, CANVAS[1] / _ENCAR_PHOTO_H)
+_displayed_photo_h = int(_ENCAR_PHOTO_H * _contain_scale)
+PHOTO_ZONE_BOTTOM = (CANVAS[1] + _displayed_photo_h) // 2  # == 1284
+
+INFO_BG = (10, 10, 14, 255)
 
 
 def _render_overlay(fields: dict) -> Image.Image:
     cw, ch = CANVAS
     overlay = Image.new("RGBA", CANVAS, (0, 0, 0, 0))
-
-    scrim_h = int(ch * 0.42)
-    scrim = Image.new("L", (1, scrim_h), color=0)
-    for y in range(scrim_h):
-        scrim.putpixel((0, y), int(200 * (y / scrim_h) ** 1.4))
-    scrim = scrim.resize((cw, scrim_h))
-    black = Image.new("RGBA", (cw, scrim_h), (0, 0, 0, 255))
-    black.putalpha(scrim)
-    overlay.paste(black, (0, ch - scrim_h), black)
-
     draw = ImageDraw.Draw(overlay)
+
+    # Solid info card filling the rest of the canvas below the photo.
+    draw.rectangle([0, PHOTO_ZONE_BOTTOM, cw, ch], fill=INFO_BG)
+
     pad = 56
     title_font = ImageFont.truetype(FONT_BOLD, 64)
     trim_font = ImageFont.truetype(FONT_REGULAR, 34)
     spec_font = ImageFont.truetype(FONT_REGULAR, 36)
     price_font = ImageFont.truetype(FONT_BOLD, 46)
+    cta_font = ImageFont.truetype(FONT_BOLD, 38)
 
     max_text_width = cw - 2 * pad
 
-    y = ch - scrim_h + 40 - BOTTOM_SAFE_MARGIN
+    y = PHOTO_ZONE_BOTTOM + 36
     title = f"{fields['brand']} {fields['model']}".strip()
     for line in _wrap_words(draw, title, title_font, max_text_width):
         draw.text((pad, y), line, font=title_font, fill=(255, 255, 255, 255))
@@ -168,18 +170,17 @@ def _render_overlay(fields: dict) -> Image.Image:
         logo.putalpha(alpha)
         overlay.paste(logo, (pad, 128), logo)
 
-    # CTA pill, bottom-left (where the logo used to sit) — same visual
-    # language as the price pill, nudging viewers toward the details/link
-    # rather than just naming the site (that's the outro card's job).
+    # CTA pill, stacked right below the text block within the same info card
+    # (not pinned to the bottom edge — it just follows wherever the text ends,
+    # so 1- or 2-line specs both look right).
+    y += 30
     cta_text = "Vezi detalii →"
-    cta_font = ImageFont.truetype(FONT_BOLD, 38)
     cb = draw.textbbox((0, 0), cta_text, font=cta_font)
     cta_w, cta_h = cb[2] - cb[0], cb[3] - cb[1]
     cta_pill_w, cta_pill_h = cta_w + 56, cta_h + 38
-    cx0, cy0 = pad, ch - cta_pill_h - 44 - BOTTOM_SAFE_MARGIN
     cta_radius = max(1, cta_pill_h // 2 - 2)
-    draw.rounded_rectangle([cx0, cy0, cx0 + cta_pill_w, cy0 + cta_pill_h], radius=cta_radius, fill=(20, 110, 90, 235))
-    draw.text((cx0 + 28, cy0 + 19 - cta_h // 2 - cb[1]), cta_text, font=cta_font, fill=(255, 255, 255, 255))
+    draw.rounded_rectangle([pad, y, pad + cta_pill_w, y + cta_pill_h], radius=cta_radius, fill=(20, 110, 90, 235))
+    draw.text((pad + 28, y + 19 - cta_h // 2 - cb[1]), cta_text, font=cta_font, fill=(255, 255, 255, 255))
 
     return overlay
 
