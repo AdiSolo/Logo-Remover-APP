@@ -124,18 +124,21 @@ def _render_overlay(fields: dict) -> Image.Image:
     spec_font = ImageFont.truetype(FONT_REGULAR, 36)
     price_font = ImageFont.truetype(FONT_BOLD, 46)
 
+    max_text_width = cw - 2 * pad
+
     y = ch - scrim_h + 40 - BOTTOM_SAFE_MARGIN
     title = f"{fields['brand']} {fields['model']}".strip()
-    draw.text((pad, y), title, font=title_font, fill=(255, 255, 255, 255))
-    y += 84
+    for line in _wrap_words(draw, title, title_font, max_text_width):
+        draw.text((pad, y), line, font=title_font, fill=(255, 255, 255, 255))
+        y += 84
     if fields.get("trim"):
         draw.text((pad, y), str(fields["trim"]), font=trim_font, fill=(230, 230, 230, 255))
         y += 56
 
-    spec_parts = [fields.get(k) for k in ("year", "mileage", "fuel", "transmission", "body")]
-    spec = " · ".join(str(p) for p in spec_parts if p)
-    if spec:
-        draw.text((pad, y), spec, font=spec_font, fill=(210, 210, 210, 255))
+    spec_parts = [str(p) for p in (fields.get(k) for k in ("year", "mileage", "fuel", "transmission", "body")) if p]
+    for line in _wrap_parts(draw, spec_parts, " · ", spec_font, max_text_width):
+        draw.text((pad, y), line, font=spec_font, fill=(210, 210, 210, 255))
+        y += 44
 
     price_text = str(fields.get("price") or "")
     if price_text:
@@ -179,6 +182,44 @@ def _render_overlay(fields: dict) -> Image.Image:
     draw.text((cx0 + 28, cy0 + 19 - cta_h // 2 - cb[1]), cta_text, font=cta_font, fill=(255, 255, 255, 255))
 
     return overlay
+
+
+def _wrap_words(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
+    """Greedy word-wrap so long brand+model combos don't run off the canvas
+    (confirmed happening: DejaVu renders noticeably wider than the Arial used
+    to eyeball this locally, and real listing text is longer/shorter than
+    whatever sample was tested)."""
+    words = text.split(" ")
+    lines: list[str] = []
+    current = ""
+    for w in words:
+        candidate = f"{current} {w}".strip()
+        if not current or draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = w
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _wrap_parts(draw: ImageDraw.ImageDraw, parts: list[str], sep: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
+    """Like _wrap_words, but wraps at `sep`-joined part boundaries (e.g. the
+    spec line's " · "-separated fields) so a single part like "71.973 km"
+    never splits mid-way."""
+    lines: list[str] = []
+    current: list[str] = []
+    for p in parts:
+        candidate = sep.join(current + [p])
+        if not current or draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            current.append(p)
+        else:
+            lines.append(sep.join(current))
+            current = [p]
+    if current:
+        lines.append(sep.join(current))
+    return lines
 
 
 def _centered_x(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, cw: int) -> int:
