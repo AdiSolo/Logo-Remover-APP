@@ -93,6 +93,13 @@ def _prepare_frame(src: Path, dest: Path) -> None:
     canvas.save(dest, quality=90)
 
 
+#  Reels/TikTok/Instagram all overlay their OWN chrome (caption, username,
+# sound/share icons) across roughly the bottom 12-15% of a vertical video —
+# text placed at the true bottom edge gets covered once actually posted. Keep
+# everything (including the logo) clear of that zone.
+BOTTOM_SAFE_MARGIN = 220
+
+
 def _render_overlay(fields: dict) -> Image.Image:
     cw, ch = CANVAS
     overlay = Image.new("RGBA", CANVAS, (0, 0, 0, 0))
@@ -114,13 +121,13 @@ def _render_overlay(fields: dict) -> Image.Image:
     price_font = ImageFont.truetype(FONT_BOLD, 46)
     site_font = ImageFont.truetype(FONT_BOLD, 30)
 
-    y = ch - scrim_h + 40
+    y = ch - scrim_h + 40 - BOTTOM_SAFE_MARGIN
     title = f"{fields['brand']} {fields['model']}".strip()
     draw.text((pad, y), title, font=title_font, fill=(255, 255, 255, 255))
-    y += 78
+    y += 84
     if fields.get("trim"):
         draw.text((pad, y), str(fields["trim"]), font=trim_font, fill=(230, 230, 230, 255))
-        y += 46
+        y += 56
 
     spec_parts = [fields.get(k) for k in ("year", "mileage", "fuel", "transmission", "body")]
     spec = " · ".join(str(p) for p in spec_parts if p)
@@ -152,9 +159,9 @@ def _render_overlay(fields: dict) -> Image.Image:
         logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
         alpha = logo.split()[3].point(lambda a: int(a * 0.9))
         logo.putalpha(alpha)
-        overlay.paste(logo, (pad, ch - logo_h - 44), logo)
+        overlay.paste(logo, (pad, ch - logo_h - 44 - BOTTOM_SAFE_MARGIN), logo)
     elif fields.get("site_url"):
-        draw.text((pad, ch - 50), str(fields["site_url"]), font=site_font, fill=(255, 255, 255, 160))
+        draw.text((pad, ch - 50 - BOTTOM_SAFE_MARGIN), str(fields["site_url"]), font=site_font, fill=(255, 255, 255, 160))
 
     return overlay
 
