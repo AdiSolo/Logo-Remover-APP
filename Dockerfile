@@ -1,9 +1,9 @@
 FROM python:3.11-slim
 # System libs OpenCV needs at runtime (headless build still needs these), plus
-# ffmpeg (reel video encoding) and a font with Romanian diacritics (Pillow text
-# overlays on the reel).
+# ffmpeg (reel video encoding). Reel text overlays use the bundled Geist TTFs
+# (assets/) instead of a system font package — same font AutoCo.ro's site uses.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libglib2.0-0 libgl1 curl ffmpeg fonts-dejavu-core && \
+        libglib2.0-0 libgl1 curl ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

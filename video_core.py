@@ -32,9 +32,12 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
-FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
-FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
+# Geist — the same font AutoCo.ro's own site loads (next/font/google), so the
+# reel's text matches the brand instead of a generic system font. Bundled as
+# static TTFs (assets/) fetched straight from Google Fonts' CDN, same files
+# the site itself serves.
+FONT_BOLD = os.path.join(ASSET_DIR, "Geist-Bold.ttf")
+FONT_REGULAR = os.path.join(ASSET_DIR, "Geist-Regular.ttf")
 
 CANVAS = (1080, 1920)
 
@@ -154,7 +157,10 @@ def _render_overlay(fields: dict) -> Image.Image:
         # production font) — stay a couple px under the boundary.
         radius = max(1, pill_h // 2 - 2)
         draw.rounded_rectangle([px0, py0, px0 + pill_w, py0 + pill_h], radius=radius, fill=(20, 110, 90, 235))
-        draw.text((px0 + 32, py0 + 22 - th // 2 - tb[1]), price_text, font=price_font, fill=(255, 255, 255, 255))
+        # Vertically centers the ink in the pill: pill center is py0+pill_h/2 =
+        # py0+22+th/2; subtracting th/2 again (as an earlier version did) pushed
+        # the text noticeably above center — confirmed visually wrong.
+        draw.text((px0 + 32, py0 + 22 - tb[1]), price_text, font=price_font, fill=(255, 255, 255, 255))
 
     # AutoCo.ro's own brand mark — NOT assets/logo.png (that one is the
     # Encar-lookalike wordmark pasted onto photos by the unrelated /rebrand
@@ -180,7 +186,7 @@ def _render_overlay(fields: dict) -> Image.Image:
     cta_pill_w, cta_pill_h = cta_w + 56, cta_h + 38
     cta_radius = max(1, cta_pill_h // 2 - 2)
     draw.rounded_rectangle([pad, y, pad + cta_pill_w, y + cta_pill_h], radius=cta_radius, fill=(20, 110, 90, 235))
-    draw.text((pad + 28, y + 19 - cta_h // 2 - cb[1]), cta_text, font=cta_font, fill=(255, 255, 255, 255))
+    draw.text((pad + 28, y + 19 - cb[1]), cta_text, font=cta_font, fill=(255, 255, 255, 255))
 
     return overlay
 
