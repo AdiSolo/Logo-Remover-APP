@@ -234,10 +234,15 @@ def _build_filter_complex(n: int) -> tuple[str, float]:
         # a solo zoompan clip ran well past 60s instead of stopping at 108
         # frames/3.6s) — an explicit trim+setpts makes each clip's length exact
         # and deterministic, which the xfade offset math below depends on.
+        # `fps=` is repeated explicitly after trim/setpts — on at least one
+        # ffmpeg build (the production VPS, not reproduced locally) trim
+        # drops the constant-frame-rate metadata xfade requires ("current
+        # rate of 1/0 is invalid"); re-stamping it here is cheap and harmless
+        # where it wasn't actually needed.
         parts.append(
             f"[{i}:v]zoompan=z='{z_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
             f"d={hold_frames}:s={CANVAS[0]}x{CANVAS[1]}:fps={FPS},"
-            f"trim=duration={hold_seconds:.3f},setpts=PTS-STARTPTS,setsar=1[z{i}]"
+            f"trim=duration={hold_seconds:.3f},setpts=PTS-STARTPTS,fps={FPS},setsar=1[z{i}]"
         )
 
     # Cumulative offset: each xfade starts XFADE_DUR before the running total ends.
