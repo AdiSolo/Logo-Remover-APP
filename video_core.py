@@ -133,7 +133,12 @@ def _render_overlay(fields: dict) -> Image.Image:
         tw, th = tb[2] - tb[0], tb[3] - tb[1]
         pill_w, pill_h = tw + 64, th + 44
         px0, py0 = cw - pill_w - 40, 120
-        draw.rounded_rectangle([px0, py0, px0 + pill_w, py0 + pill_h], radius=pill_h // 2, fill=(20, 110, 90, 235))
+        # radius == pill_h // 2 exactly (a full pill cap) hits a Pillow 9.5.0
+        # rounded_rectangle edge case ("y1 must be greater than or equal to
+        # y0") with certain font metrics (confirmed with real DejaVu on the
+        # production font) — stay a couple px under the boundary.
+        radius = max(1, pill_h // 2 - 2)
+        draw.rounded_rectangle([px0, py0, px0 + pill_w, py0 + pill_h], radius=radius, fill=(20, 110, 90, 235))
         draw.text((px0 + 32, py0 + 22 - th // 2 - tb[1]), price_text, font=price_font, fill=(255, 255, 255, 255))
 
     logo_path = os.path.join(ASSET_DIR, "logo.png")
