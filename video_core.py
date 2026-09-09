@@ -123,7 +123,6 @@ def _render_overlay(fields: dict) -> Image.Image:
     trim_font = ImageFont.truetype(FONT_REGULAR, 34)
     spec_font = ImageFont.truetype(FONT_REGULAR, 36)
     price_font = ImageFont.truetype(FONT_BOLD, 46)
-    site_font = ImageFont.truetype(FONT_BOLD, 30)
 
     y = ch - scrim_h + 40 - BOTTOM_SAFE_MARGIN
     title = f"{fields['brand']} {fields['model']}".strip()
@@ -154,18 +153,30 @@ def _render_overlay(fields: dict) -> Image.Image:
 
     # AutoCo.ro's own brand mark — NOT assets/logo.png (that one is the
     # Encar-lookalike wordmark pasted onto photos by the unrelated /rebrand
-    # logo=titanic feature; wrong brand for a reel we post ourselves).
+    # logo=titanic feature; wrong brand for a reel we post ourselves). Top-left,
+    # roughly level with the price pill on the top-right.
     logo_path = os.path.join(ASSET_DIR, "autoco-logo.png")
     if os.path.exists(logo_path):
         logo = Image.open(logo_path).convert("RGBA")
-        logo_w = 220
+        logo_w = 200
         logo_h = int(logo.height * (logo_w / logo.width))
         logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
         alpha = logo.split()[3].point(lambda a: int(a * 0.9))
         logo.putalpha(alpha)
-        overlay.paste(logo, (pad, ch - logo_h - 44 - BOTTOM_SAFE_MARGIN), logo)
-    elif fields.get("site_url"):
-        draw.text((pad, ch - 50 - BOTTOM_SAFE_MARGIN), str(fields["site_url"]), font=site_font, fill=(255, 255, 255, 160))
+        overlay.paste(logo, (pad, 128), logo)
+
+    # CTA pill, bottom-left (where the logo used to sit) — same visual
+    # language as the price pill, nudging viewers toward the details/link
+    # rather than just naming the site (that's the outro card's job).
+    cta_text = "Vezi detalii →"
+    cta_font = ImageFont.truetype(FONT_BOLD, 38)
+    cb = draw.textbbox((0, 0), cta_text, font=cta_font)
+    cta_w, cta_h = cb[2] - cb[0], cb[3] - cb[1]
+    cta_pill_w, cta_pill_h = cta_w + 56, cta_h + 38
+    cx0, cy0 = pad, ch - cta_pill_h - 44 - BOTTOM_SAFE_MARGIN
+    cta_radius = max(1, cta_pill_h // 2 - 2)
+    draw.rounded_rectangle([cx0, cy0, cx0 + cta_pill_w, cy0 + cta_pill_h], radius=cta_radius, fill=(20, 110, 90, 235))
+    draw.text((cx0 + 28, cy0 + 19 - cta_h // 2 - cb[1]), cta_text, font=cta_font, fill=(255, 255, 255, 255))
 
     return overlay
 
