@@ -68,7 +68,13 @@ def _pick_photos(photo_urls: list[str], n: int) -> list[str]:
     return [photo_urls[int(i * step)] for i in range(n)]
 
 
-def _prepare_frame(src: Path, overlay: Image.Image, dest: Path) -> None:
+def _prepare_frame(src: Path, dest: Path) -> None:
+    """Just the photo, story-composited onto the 1080x1920 canvas — NO overlay
+    text here. The overlay is composited once, after the crossfade chain, in
+    the ffmpeg graph (see _build_filter_complex) — baking it into each frame
+    would make it double-expose/ghost during every xfade transition, since the
+    same static text would be blending with itself (confirmed visually while
+    testing this)."""
     img = Image.open(src)
     img = ImageOps.exif_transpose(img).convert("RGB")
 
@@ -82,9 +88,8 @@ def _prepare_frame(src: Path, overlay: Image.Image, dest: Path) -> None:
     fw, fh = int(iw * scale), int(ih * scale)
     fg = img.resize((fw, fh), Image.LANCZOS)
 
-    canvas = bg.convert("RGBA")
+    canvas = bg.convert("RGB")
     canvas.paste(fg, ((cw - fw) // 2, (ch - fh) // 2))
-    canvas = Image.alpha_composite(canvas, overlay).convert("RGB")
     canvas.save(dest, quality=90)
 
 
@@ -147,8 +152,11 @@ def _render_overlay(fields: dict) -> Image.Image:
 
 
 def _build_filter_complex(n: int) -> tuple[str, float]:
-    """Ken Burns (zoompan) per input, chained crossfades (xfade) between
-    consecutive clips. Returns (filter_complex_string, total_duration_seconds)."""
+    """Ken Burns (zoompan) per photo input, chained crossfades (xfade) between
+    consecutive clips, then ONE overlay of the branded PNG (input index n) on
+    top of the finished crossfade chain — composited after the fades, not
+    baked into each frame, so the static text never double-exposes during a
+    transition. Returns (filter_complex_string, total_duration_seconds)."""
     hold_frames = int((CLIP_DUR + XFADE_DUR) * FPS)
     parts = []
     for i in range(n):
@@ -173,11 +181,13 @@ def _build_filter_complex(n: int) -> tuple[str, float]:
         prev = out_label
     total = running
 
+    parts.append(f"[{prev}][{n}:v]overlay=0:0:format=auto[vout]")
+
     filter_complex = ";\n".join(parts)
     return filter_complex, total
 
 
-def _run_ffmpeg(frame_paths: list[Path], out_path: Path) -> None:
+def _run_ffmpeg(frame_paths: list[Path], overlay_path: Path, out_path: Path) -> None:
     n = len(frame_paths)
     filter_complex, total_duration = _build_filter_complex(n)
     hold_seconds = CLIP_DUR + XFADE_DUR
@@ -185,13 +195,13 @@ def _run_ffmpeg(frame_paths: list[Path], out_path: Path) -> None:
     cmd = ["ffmpeg", "-y"]
     for p in frame_paths:
         cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{hold_seconds:.3f}", "-i", str(p)]
-    cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+    cmd += ["-loop", "1", "-i", str(overlay_path)]  # input n: the branded overlay PNG
+    cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]  # input n+1: silent audio
 
-    final_video_label = f"x{n - 1}" if n > 1 else "z0"
     cmd += [
         "-filter_complex", filter_complex,
-        "-map", f"[{final_video_label}]",
-        "-map", f"{n}:a",
+        "-map", "[vout]",
+        "-map", f"{n + 1}:a",
         "-t", f"{total_duration:.3f}",
         "-c:v", "libx264", "-profile:v", "main", "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart",
@@ -218,13 +228,15 @@ def render_reel(photo_urls: list[str], fields: dict, workdir: Path) -> Path:
     if len(downloaded) < MIN_PHOTOS:
         raise ReelError(f"only {len(downloaded)} of {len(candidates)} photos downloaded successfully (need >= {MIN_PHOTOS})")
 
-    overlay = _render_overlay(fields)
+    overlay_path = workdir / "overlay.png"
+    _render_overlay(fields).save(overlay_path)
+
     frame_paths = []
     for i, src in enumerate(downloaded):
         dest = workdir / f"frame_{i:02d}.jpg"
-        _prepare_frame(src, overlay, dest)
+        _prepare_frame(src, dest)
         frame_paths.append(dest)
 
     out_path = workdir / "reel.mp4"
-    _run_ffmpeg(frame_paths, out_path)
+    _run_ffmpeg(frame_paths, overlay_path, out_path)
     return out_path
