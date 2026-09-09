@@ -141,13 +141,16 @@ def _render_overlay(fields: dict) -> Image.Image:
         draw.rounded_rectangle([px0, py0, px0 + pill_w, py0 + pill_h], radius=radius, fill=(20, 110, 90, 235))
         draw.text((px0 + 32, py0 + 22 - th // 2 - tb[1]), price_text, font=price_font, fill=(255, 255, 255, 255))
 
-    logo_path = os.path.join(ASSET_DIR, "logo.png")
+    # AutoCo.ro's own brand mark — NOT assets/logo.png (that one is the
+    # Encar-lookalike wordmark pasted onto photos by the unrelated /rebrand
+    # logo=titanic feature; wrong brand for a reel we post ourselves).
+    logo_path = os.path.join(ASSET_DIR, "autoco-logo.png")
     if os.path.exists(logo_path):
         logo = Image.open(logo_path).convert("RGBA")
-        logo_w = 260
+        logo_w = 220
         logo_h = int(logo.height * (logo_w / logo.width))
         logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
-        alpha = logo.split()[3].point(lambda a: int(a * 0.8))
+        alpha = logo.split()[3].point(lambda a: int(a * 0.9))
         logo.putalpha(alpha)
         overlay.paste(logo, (pad, ch - logo_h - 44), logo)
     elif fields.get("site_url"):
