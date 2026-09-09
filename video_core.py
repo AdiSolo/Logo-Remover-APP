@@ -15,8 +15,11 @@ Pipeline (all local, no network beyond downloading the source photos):
      composited onto every frame at step 2 (not as a separate ffmpeg overlay
      pass) so the ffmpeg side only ever deals with plain, uniform JPEGs.
   4. ffmpeg: Ken Burns zoom per photo (zoompan) + crossfade between consecutive
-     photos (xfade), muxed with a silent AAC track, encoded as H.264/yuv420p
-     with +faststart for social-platform compatibility.
+     photos (xfade), then the branded overlay from step 3 composited once over
+     that whole chain. A static end-card (CTA text + logo, own dark
+     background — no title/price overlay on it) is concatenated on afterward.
+     Muxed with a silent AAC track, encoded as H.264/yuv420p with +faststart
+     for social-platform compatibility.
 
 This module is pure processing (mirrors rebrand_core.py's role) — no FastAPI,
 no job-queue logic; api.py owns the async job wrapper around render_reel().
@@ -39,6 +42,7 @@ MIN_PHOTOS = int(os.environ.get("VIDEO_MIN_PHOTOS", "4"))
 MAX_PHOTOS = int(os.environ.get("VIDEO_MAX_PHOTOS", "8"))
 CLIP_DUR = float(os.environ.get("VIDEO_CLIP_DUR", "3.0"))  # seconds each photo holds
 XFADE_DUR = float(os.environ.get("VIDEO_XFADE_DUR", "0.6"))  # crossfade overlap
+OUTRO_DUR = float(os.environ.get("VIDEO_OUTRO_DUR", "3.0"))  # seconds the end-card holds
 FPS = 30
 VIDEO_ALGO_VERSION = os.environ.get("VIDEO_ALGO_VERSION", "1")  # bump on template redesign
 
@@ -166,13 +170,58 @@ def _render_overlay(fields: dict) -> Image.Image:
     return overlay
 
 
+def _centered_x(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, cw: int) -> int:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    w = bbox[2] - bbox[0]
+    return (cw - w) // 2 - bbox[0]
+
+
+def _render_outro_frame() -> Image.Image:
+    """Static end-card appended after the last photo: CTA text + our logo, on
+    its own dark background (NOT a car photo, no title/price overlay) — a
+    clean closing beat rather than another listing slide."""
+    cw, ch = CANVAS
+    canvas = Image.new("RGB", CANVAS, (12, 14, 20))
+    draw = ImageDraw.Draw(canvas)
+
+    cta_font = ImageFont.truetype(FONT_REGULAR, 42)
+    site_font = ImageFont.truetype(FONT_BOLD, 68)
+    cta_text = "Vezi mai multe oferte pe:"
+    site_text = "autoco.ro"
+
+    logo_path = os.path.join(ASSET_DIR, "autoco-logo.png")
+    logo_img = None
+    logo_w = logo_h = 0
+    if os.path.exists(logo_path):
+        logo_img = Image.open(logo_path).convert("RGBA")
+        logo_w = 340
+        logo_h = int(logo_img.height * (logo_w / logo_img.width))
+        logo_img = logo_img.resize((logo_w, logo_h), Image.LANCZOS)
+
+    cta_h = draw.textbbox((0, 0), cta_text, font=cta_font)[3]
+    site_h = draw.textbbox((0, 0), site_text, font=site_font)[3]
+    gap = 32
+    block_h = cta_h + gap + site_h + gap * 2 + logo_h
+    y = (ch - block_h) // 2
+
+    draw.text((_centered_x(draw, cta_text, cta_font, cw), y), cta_text, font=cta_font, fill=(210, 210, 210, 255))
+    y += cta_h + gap
+    draw.text((_centered_x(draw, site_text, site_font, cw), y), site_text, font=site_font, fill=(255, 255, 255, 255))
+    y += site_h + gap * 2
+    if logo_img:
+        canvas.paste(logo_img, ((cw - logo_w) // 2, y), logo_img)
+
+    return canvas
+
+
 def _build_filter_complex(n: int) -> tuple[str, float]:
     """Ken Burns (zoompan) per photo input, chained crossfades (xfade) between
     consecutive clips, then ONE overlay of the branded PNG (input index n) on
     top of the finished crossfade chain — composited after the fades, not
     baked into each frame, so the static text never double-exposes during a
     transition. Returns (filter_complex_string, total_duration_seconds)."""
-    hold_frames = int((CLIP_DUR + XFADE_DUR) * FPS)
+    hold_seconds = CLIP_DUR + XFADE_DUR
+    hold_frames = int(hold_seconds * FPS)
     parts = []
     for i in range(n):
         zoom_in = i % 2 == 0
@@ -180,43 +229,73 @@ def _build_filter_complex(n: int) -> tuple[str, float]:
             z_expr = "min(zoom+0.0015,1.18)"
         else:
             z_expr = "if(eq(on,1),1.18,max(1.18-0.0015*on,1.0))"
+        # zoompan's `d` does NOT reliably bound its own output length when fed a
+        # looped still image (confirmed empirically: without an explicit trim,
+        # a solo zoompan clip ran well past 60s instead of stopping at 108
+        # frames/3.6s) — an explicit trim+setpts makes each clip's length exact
+        # and deterministic, which the xfade offset math below depends on.
         parts.append(
             f"[{i}:v]zoompan=z='{z_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-            f"d={hold_frames}:s={CANVAS[0]}x{CANVAS[1]}:fps={FPS},setsar=1[z{i}]"
+            f"d={hold_frames}:s={CANVAS[0]}x{CANVAS[1]}:fps={FPS},"
+            f"trim=duration={hold_seconds:.3f},setpts=PTS-STARTPTS,setsar=1[z{i}]"
         )
 
     # Cumulative offset: each xfade starts XFADE_DUR before the running total ends.
-    running = CLIP_DUR
+    # xfade's real output length is offset + len(second_input) — verified empirically
+    # (a solid-color 2-clip test: offset=2.4, second input 3.6s long -> output 6.0s,
+    # not 5.4s as a naive offset+duration guess would give). So the running total
+    # must start at hold_seconds (len of z0 as fed into the first merge), not
+    # CLIP_DUR — starting from CLIP_DUR undercounts every offset by XFADE_DUR and
+    # compounds, silently truncating the last photo(s) (and anything appended after,
+    # like the outro card) once -t total_duration cuts the output short.
+    running = CLIP_DUR + XFADE_DUR
     prev = "z0"
     for i in range(1, n):
         out_label = f"x{i}"
         offset = running - XFADE_DUR
         parts.append(f"[{prev}][z{i}]xfade=transition=fade:duration={XFADE_DUR}:offset={offset:.3f}[{out_label}]")
-        running = running + CLIP_DUR - XFADE_DUR
+        # new_running = offset + len(z_i) = (running - XFADE_DUR) + hold_seconds = running + CLIP_DUR
+        running = running + CLIP_DUR
         prev = out_label
     total = running
 
-    parts.append(f"[{prev}][{n}:v]overlay=0:0:format=auto[vout]")
+    # Named [main_out], not [vout] — the outro end-card (its own segment, no
+    # title/price overlay) is concatenated on afterward in _run_ffmpeg to
+    # produce the actual final [vout].
+    # shortest=1 is essential: the overlay PNG input is an infinitely-looped
+    # still (-loop 1, no -t), and overlay's default shortest=0 holds/freezes
+    # the main chain's LAST frame until the longer (infinite) input ends —
+    # confirmed empirically this silently ate the rest of the timeline (the
+    # outro concat never got reached; -t just cut off mid-freeze).
+    parts.append(f"[{prev}][{n}:v]overlay=0:0:format=auto:shortest=1[main_out]")
 
     filter_complex = ";\n".join(parts)
     return filter_complex, total
 
 
-def _run_ffmpeg(frame_paths: list[Path], overlay_path: Path, out_path: Path) -> None:
+def _run_ffmpeg(frame_paths: list[Path], overlay_path: Path, outro_path: Path, out_path: Path) -> None:
     n = len(frame_paths)
-    filter_complex, total_duration = _build_filter_complex(n)
+    filter_complex, main_duration = _build_filter_complex(n)
     hold_seconds = CLIP_DUR + XFADE_DUR
+    total_duration = main_duration + OUTRO_DUR
 
     cmd = ["ffmpeg", "-y"]
     for p in frame_paths:
         cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{hold_seconds:.3f}", "-i", str(p)]
     cmd += ["-loop", "1", "-i", str(overlay_path)]  # input n: the branded overlay PNG
-    cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]  # input n+1: silent audio
+    cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{OUTRO_DUR:.3f}", "-i", str(outro_path)]  # input n+1: end-card
+    cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]  # input n+2: silent audio
+
+    outro_idx = n + 1
+    filter_complex += (
+        f";\n[{outro_idx}:v]fps={FPS},setsar=1[outro_z]"
+        f";\n[main_out][outro_z]concat=n=2:v=1:a=0[vout]"
+    )
 
     cmd += [
         "-filter_complex", filter_complex,
         "-map", "[vout]",
-        "-map", f"{n + 1}:a",
+        "-map", f"{n + 2}:a",
         "-t", f"{total_duration:.3f}",
         "-c:v", "libx264", "-profile:v", "main", "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart",
@@ -246,6 +325,9 @@ def render_reel(photo_urls: list[str], fields: dict, workdir: Path) -> Path:
     overlay_path = workdir / "overlay.png"
     _render_overlay(fields).save(overlay_path)
 
+    outro_path = workdir / "outro.jpg"
+    _render_outro_frame().save(outro_path, quality=90)
+
     frame_paths = []
     for i, src in enumerate(downloaded):
         dest = workdir / f"frame_{i:02d}.jpg"
@@ -253,5 +335,5 @@ def render_reel(photo_urls: list[str], fields: dict, workdir: Path) -> Path:
         frame_paths.append(dest)
 
     out_path = workdir / "reel.mp4"
-    _run_ffmpeg(frame_paths, overlay_path, out_path)
+    _run_ffmpeg(frame_paths, overlay_path, outro_path, out_path)
     return out_path
