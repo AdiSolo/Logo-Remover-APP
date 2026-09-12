@@ -114,13 +114,11 @@ PHOTO_ZONE_BOTTOM = (CANVAS[1] + _displayed_photo_h) // 2  # == 1284
 
 INFO_BG = (10, 10, 14, 255)
 
-# Logo + price used to sit directly on the blurred background above the photo,
-# which varies wildly in color/darkness per source photo (fine on some cars,
-# low-contrast/clashing on others) and left them stranded far from the image.
-# A dedicated solid band flush against the photo's top edge — same treatment
-# already used below the photo for the title/spec/price/CTA card — fixes both:
-# guaranteed legibility, and the branding reads as a header for the photo
-# instead of floating at the very top of the canvas.
+# Logo + price sit in a band flush against the photo's top edge, so the branding
+# reads as a header for the image instead of floating at the very top of the
+# canvas. Positioning anchor only — the band itself is left TRANSPARENT (the
+# blurred background shows through); a solid fill here was tried and rejected as
+# too heavy a bar across the frame.
 TOP_BAND_HEIGHT = 160
 TOP_BAND_TOP = PHOTO_ZONE_TOP - TOP_BAND_HEIGHT
 
@@ -130,9 +128,8 @@ def _render_overlay(fields: dict) -> Image.Image:
     overlay = Image.new("RGBA", CANVAS, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # Solid bands flush against the photo's top and bottom edges — logo/price
-    # live in the top one, title/spec/price-text/CTA in the bottom one.
-    draw.rectangle([0, TOP_BAND_TOP, cw, PHOTO_ZONE_TOP], fill=INFO_BG)
+    # Solid info card filling the rest of the canvas below the photo. The top
+    # band (logo/price) deliberately gets no fill — see TOP_BAND_TOP.
     draw.rectangle([0, PHOTO_ZONE_BOTTOM, cw, ch], fill=INFO_BG)
 
     pad = 56
