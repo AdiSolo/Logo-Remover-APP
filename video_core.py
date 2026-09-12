@@ -109,9 +109,20 @@ def _prepare_frame(src: Path, dest: Path) -> None:
 _ENCAR_PHOTO_W, _ENCAR_PHOTO_H = 1160, 696
 _contain_scale = min(CANVAS[0] / _ENCAR_PHOTO_W, CANVAS[1] / _ENCAR_PHOTO_H)
 _displayed_photo_h = int(_ENCAR_PHOTO_H * _contain_scale)
+PHOTO_ZONE_TOP = (CANVAS[1] - _displayed_photo_h) // 2  # == 636
 PHOTO_ZONE_BOTTOM = (CANVAS[1] + _displayed_photo_h) // 2  # == 1284
 
 INFO_BG = (10, 10, 14, 255)
+
+# Logo + price used to sit directly on the blurred background above the photo,
+# which varies wildly in color/darkness per source photo (fine on some cars,
+# low-contrast/clashing on others) and left them stranded far from the image.
+# A dedicated solid band flush against the photo's top edge — same treatment
+# already used below the photo for the title/spec/price/CTA card — fixes both:
+# guaranteed legibility, and the branding reads as a header for the photo
+# instead of floating at the very top of the canvas.
+TOP_BAND_HEIGHT = 160
+TOP_BAND_TOP = PHOTO_ZONE_TOP - TOP_BAND_HEIGHT
 
 
 def _render_overlay(fields: dict) -> Image.Image:
@@ -119,7 +130,9 @@ def _render_overlay(fields: dict) -> Image.Image:
     overlay = Image.new("RGBA", CANVAS, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # Solid info card filling the rest of the canvas below the photo.
+    # Solid bands flush against the photo's top and bottom edges — logo/price
+    # live in the top one, title/spec/price-text/CTA in the bottom one.
+    draw.rectangle([0, TOP_BAND_TOP, cw, PHOTO_ZONE_TOP], fill=INFO_BG)
     draw.rectangle([0, PHOTO_ZONE_BOTTOM, cw, ch], fill=INFO_BG)
 
     pad = 56
@@ -150,7 +163,8 @@ def _render_overlay(fields: dict) -> Image.Image:
         tb = draw.textbbox((0, 0), price_text, font=price_font)
         tw, th = tb[2] - tb[0], tb[3] - tb[1]
         pill_w, pill_h = tw + 64, th + 44
-        px0, py0 = cw - pill_w - 40, 120
+        px0 = cw - pill_w - 40
+        py0 = TOP_BAND_TOP + (TOP_BAND_HEIGHT - pill_h) // 2
         # radius == pill_h // 2 exactly (a full pill cap) hits a Pillow 9.5.0
         # rounded_rectangle edge case ("y1 must be greater than or equal to
         # y0") with certain font metrics (confirmed with real DejaVu on the
@@ -164,8 +178,8 @@ def _render_overlay(fields: dict) -> Image.Image:
 
     # AutoCo.ro's own brand mark — NOT assets/logo.png (that one is the
     # Encar-lookalike wordmark pasted onto photos by the unrelated /rebrand
-    # logo=titanic feature; wrong brand for a reel we post ourselves). Top-left,
-    # roughly level with the price pill on the top-right.
+    # logo=titanic feature; wrong brand for a reel we post ourselves). Top-left
+    # of the same band, vertically centered like the price pill.
     logo_path = os.path.join(ASSET_DIR, "autoco-logo.png")
     if os.path.exists(logo_path):
         logo = Image.open(logo_path).convert("RGBA")
@@ -174,7 +188,8 @@ def _render_overlay(fields: dict) -> Image.Image:
         logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
         alpha = logo.split()[3].point(lambda a: int(a * 0.9))
         logo.putalpha(alpha)
-        overlay.paste(logo, (pad, 128), logo)
+        logo_y = TOP_BAND_TOP + (TOP_BAND_HEIGHT - logo_h) // 2
+        overlay.paste(logo, (pad, logo_y), logo)
 
     # CTA pill, stacked right below the text block within the same info card
     # (not pinned to the bottom edge — it just follows wherever the text ends,
