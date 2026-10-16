@@ -156,22 +156,58 @@ def _render_overlay(fields: dict) -> Image.Image:
         y += 44
 
     price_text = str(fields.get("price") or "")
+    # Second line inside the pill, saying what the price covers (the app sends
+    # the full landed cost, so a bare number would read as the car's own
+    # price). Drawn on the pill rather than under it because the band is
+    # transparent — loose text there would sit on the blurred photo, which is
+    # exactly where it can't be relied on to stay readable.
+    note_text = str(fields.get("price_note") or "")
     if price_text:
         tb = draw.textbbox((0, 0), price_text, font=price_font)
         tw, th = tb[2] - tb[0], tb[3] - tb[1]
-        pill_w, pill_h = tw + 64, th + 44
+
+        # The note is a phrase next to a 6-character price, so it is what sets
+        # the pill's width. Shrink it until the pill still clears the logo on
+        # the band's left; a longer note (or a bigger price) must never push
+        # the two into each other.
+        note_gap = 12
+        note_size = 28
+        nb = None
+        if note_text:
+            logo_limit = pad + 200 + 28  # logo box + breathing room
+            while True:
+                note_font = ImageFont.truetype(FONT_REGULAR, note_size)
+                nb = draw.textbbox((0, 0), note_text, font=note_font)
+                if cw - (max(tw, nb[2] - nb[0]) + 64) - 40 >= logo_limit or note_size <= 18:
+                    break
+                note_size -= 2
+
+        note_w = (nb[2] - nb[0]) if nb else 0
+        note_h = (nb[3] - nb[1]) if nb else 0
+        pill_w = max(tw, note_w) + 64
+        pill_h = th + 44 + ((note_gap + note_h) if nb else 0)
         px0 = cw - pill_w - 40
         py0 = TOP_BAND_TOP + (TOP_BAND_HEIGHT - pill_h) // 2
         # radius == pill_h // 2 exactly (a full pill cap) hits a Pillow 9.5.0
         # rounded_rectangle edge case ("y1 must be greater than or equal to
         # y0") with certain font metrics (confirmed with real DejaVu on the
-        # production font) — stay a couple px under the boundary.
-        radius = max(1, pill_h // 2 - 2)
+        # production font) — stay a couple px under the boundary. With two
+        # lines the shape is a rounded rectangle anyway, so cap the radius at
+        # the single-line look instead of letting it scale with the height.
+        radius = max(1, min(pill_h // 2 - 2, 38))
         draw.rounded_rectangle([px0, py0, px0 + pill_w, py0 + pill_h], radius=radius, fill=(20, 110, 90, 235))
         # Vertically centers the ink in the pill: pill center is py0+pill_h/2 =
         # py0+22+th/2; subtracting th/2 again (as an earlier version did) pushed
-        # the text noticeably above center — confirmed visually wrong.
+        # the text noticeably above center — confirmed visually wrong. The note
+        # takes that same 22px top padding and sits a gap below the price.
         draw.text((px0 + 32, py0 + 22 - tb[1]), price_text, font=price_font, fill=(255, 255, 255, 255))
+        if nb:
+            draw.text(
+                (px0 + 32, py0 + 22 + th + note_gap - nb[1]),
+                note_text,
+                font=note_font,
+                fill=(226, 242, 236, 255),
+            )
 
     # AutoCo.ro's own brand mark — NOT assets/logo.png (that one is the
     # Encar-lookalike wordmark pasted onto photos by the unrelated /rebrand

@@ -16,7 +16,8 @@ POST /rebrand                     -> clean/rebrand an image
                                    Idempotent per (url,method,format,logo).)
 POST /video                       -> start a reel render job (async)
         JSON: {"photos": [url, ...], "fields": {brand, model, trim, year,
-               mileage, price, fuel, transmission, body, site_url}}
+               mileage, price, price_note, fuel, transmission, body,
+               site_url}}
         -> 202 {"job_id": ...}. Requires hosting (STORAGE_*) configured.
 GET  /video/{job_id}              -> poll a reel render job
         -> {"status": "queued"|"processing"|"done"|"error", "url": ..., "error": ...}
@@ -194,6 +195,9 @@ class VideoFields(BaseModel):
     year: Optional[int] = None
     mileage: Optional[str] = None
     price: Optional[str] = None
+    # Drawn under the price inside the same pill. The caller owns the wording:
+    # what the price covers depends on which figure the app chose to send.
+    price_note: Optional[str] = None
     fuel: Optional[str] = None
     transmission: Optional[str] = None
     body: Optional[str] = None
