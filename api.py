@@ -15,7 +15,8 @@ POST /rebrand                     -> clean/rebrand an image
                                    object storage and returns {"url": ...} JSON.
                                    Idempotent per (url,method,format,logo).)
 POST /video                       -> start a reel render job (async)
-        JSON: {"photos": [url, ...], "fields": {brand, model, trim, year,
+        JSON: {"photos": [url, ...], "voice_mp3_base64": "<optional>",
+               "fields": {brand, model, trim, year,
                mileage, price, price_note, fuel, transmission, body,
                site_url}}
         -> 202 {"job_id": ...}. Requires hosting (STORAGE_*) configured.
@@ -26,6 +27,7 @@ GET  /video/{job_id}              -> poll a reel render job
 Run:
     .venv-lama/bin/uvicorn api:app --host 0.0.0.0 --port 8000
 """
+import base64
 import hashlib
 import os
 import threading
@@ -207,6 +209,14 @@ class VideoFields(BaseModel):
 class VideoRequest(BaseModel):
     photos: list[str]
     fields: VideoFields
+    # Optional narration, base64 MP3. Inline rather than a URL because the
+    # audio is written for one render and discarded with it — hosting it would
+    # mean a second storage lifecycle for a file nobody ever fetches twice.
+    # Absent, the reel renders silent exactly as before.
+    voice_mp3_base64: Optional[str] = None
+    # What the narration says, carried for the log only, so a rendered reel can
+    # be checked against the script without re-running the model.
+    voice_script: Optional[str] = None
 
 
 _VIDEO_JOBS: dict[str, VideoJob] = {}
@@ -225,7 +235,7 @@ def _prune_video_jobs() -> None:
             del _VIDEO_JOBS[jid]
 
 
-def _run_video_job(job_id: str, photos: list[str], fields: dict) -> None:
+def _run_video_job(job_id: str, photos: list[str], fields: dict, voice_b64: Optional[str] = None) -> None:
     """Runs in a background thread (Starlette's run_in_threadpool via
     BackgroundTasks — this MUST stay a plain `def`, not `async def`, or it
     would run inline on the event loop and block every other request, same
@@ -235,7 +245,17 @@ def _run_video_job(job_id: str, photos: list[str], fields: dict) -> None:
     try:
         with _VIDEO_SEMAPHORE:
             with TemporaryDirectory(prefix=f"reel-{job_id}-") as tmp:
-                out_path = video_core.render_reel(photos, fields, Path(tmp))
+                voice_path = None
+                if voice_b64:
+                    # Undecodable audio renders a silent reel rather than
+                    # failing the job: the picture is the deliverable, the
+                    # voice is an enhancement to it.
+                    try:
+                        voice_path = Path(tmp) / "voice.mp3"
+                        voice_path.write_bytes(base64.b64decode(voice_b64))
+                    except Exception:
+                        voice_path = None
+                out_path = video_core.render_reel(photos, fields, Path(tmp), voice_path)
                 data = out_path.read_bytes()
                 key = storage.make_key(f"{job_id}|v{video_core.VIDEO_ALGO_VERSION}", "mp4")
                 url = storage.upload(key, data, "video/mp4")
@@ -263,7 +283,9 @@ async def start_video_endpoint(
     job_id = uuid.uuid4().hex
     with _VIDEO_JOBS_LOCK:
         _VIDEO_JOBS[job_id] = {"status": "queued", "url": None, "error": None, "created_at": time.time()}
-    background_tasks.add_task(_run_video_job, job_id, payload.photos, payload.fields.model_dump())
+    background_tasks.add_task(
+        _run_video_job, job_id, payload.photos, payload.fields.model_dump(), payload.voice_mp3_base64
+    )
     return {"job_id": job_id}
 
 

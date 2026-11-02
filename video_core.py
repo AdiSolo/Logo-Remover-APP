@@ -49,6 +49,15 @@ OUTRO_DUR = float(os.environ.get("VIDEO_OUTRO_DUR", "3.0"))  # seconds the end-c
 FPS = 30
 VIDEO_ALGO_VERSION = os.environ.get("VIDEO_ALGO_VERSION", "1")  # bump on template redesign
 
+# When a narration track comes with the request, the photo holds stretch or
+# compress so the picture finishes with the sentence instead of cutting it off
+# or leaving the voice talking over a frozen end-card. Bounded at both ends:
+# under ~2s a photo reads as a flicker, over ~5s the reel stalls.
+VOICE_MIN_CLIP_DUR = float(os.environ.get("VIDEO_VOICE_MIN_CLIP_DUR", "2.0"))
+VOICE_MAX_CLIP_DUR = float(os.environ.get("VIDEO_VOICE_MAX_CLIP_DUR", "5.0"))
+# Breath between the last spoken word and the end-card.
+VOICE_TAIL = float(os.environ.get("VIDEO_VOICE_TAIL", "0.5"))
+
 _FETCH_TIMEOUT = 20
 
 
@@ -321,13 +330,42 @@ def _render_outro_frame() -> Image.Image:
     return canvas
 
 
-def _build_filter_complex(n: int) -> tuple[str, float]:
+def _probe_duration(path: Path) -> float | None:
+    """Length of an audio/video file in seconds, or None if ffprobe can't say.
+    None is a normal answer, not an error: the caller falls back to the fixed
+    CLIP_DUR timing, which is what every reel used before narration existed."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        value = float(result.stdout.decode().strip())
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+
+def _clip_dur_for_voice(n: int, voice_seconds: float) -> float:
+    """Per-photo hold that makes the photo sequence end when the voice does.
+
+    The sequence runs n*clip + XFADE_DUR (see _build_filter_complex's offset
+    math), so solve that for clip and clamp. Clamping means a very long or very
+    short narration no longer lines up exactly — deliberate: a watchable reel
+    that ends a second off beats a slideshow at 0.8s a photo."""
+    target = voice_seconds + VOICE_TAIL - XFADE_DUR
+    return max(VOICE_MIN_CLIP_DUR, min(VOICE_MAX_CLIP_DUR, target / max(1, n)))
+
+
+def _build_filter_complex(n: int, clip_dur: float) -> tuple[str, float]:
     """Ken Burns (zoompan) per photo input, chained crossfades (xfade) between
     consecutive clips, then ONE overlay of the branded PNG (input index n) on
     top of the finished crossfade chain — composited after the fades, not
     baked into each frame, so the static text never double-exposes during a
     transition. Returns (filter_complex_string, total_duration_seconds)."""
-    hold_seconds = CLIP_DUR + XFADE_DUR
+    hold_seconds = clip_dur + XFADE_DUR
     hold_frames = int(hold_seconds * FPS)
     parts = []
     for i in range(n):
@@ -360,14 +398,14 @@ def _build_filter_complex(n: int) -> tuple[str, float]:
     # CLIP_DUR — starting from CLIP_DUR undercounts every offset by XFADE_DUR and
     # compounds, silently truncating the last photo(s) (and anything appended after,
     # like the outro card) once -t total_duration cuts the output short.
-    running = CLIP_DUR + XFADE_DUR
+    running = clip_dur + XFADE_DUR
     prev = "z0"
     for i in range(1, n):
         out_label = f"x{i}"
         offset = running - XFADE_DUR
         parts.append(f"[{prev}][z{i}]xfade=transition=fade:duration={XFADE_DUR}:offset={offset:.3f}[{out_label}]")
         # new_running = offset + len(z_i) = (running - XFADE_DUR) + hold_seconds = running + CLIP_DUR
-        running = running + CLIP_DUR
+        running = running + clip_dur
         prev = out_label
     total = running
 
@@ -385,41 +423,81 @@ def _build_filter_complex(n: int) -> tuple[str, float]:
     return filter_complex, total
 
 
-def _run_ffmpeg(frame_paths: list[Path], overlay_path: Path, outro_path: Path, out_path: Path) -> None:
+def _run_ffmpeg(
+    frame_paths: list[Path],
+    overlay_path: Path,
+    outro_path: Path,
+    out_path: Path,
+    voice_path: Path | None = None,
+) -> None:
     n = len(frame_paths)
-    filter_complex, main_duration = _build_filter_complex(n)
-    hold_seconds = CLIP_DUR + XFADE_DUR
-    total_duration = main_duration + OUTRO_DUR
+    # With narration, the photo holds follow the voice; without it, the fixed
+    # CLIP_DUR every reel used before.
+    clip_dur = CLIP_DUR
+    voice_seconds = None
+    if voice_path is not None:
+        voice_seconds = _probe_duration(voice_path)
+        if voice_seconds is not None:
+            clip_dur = _clip_dur_for_voice(n, voice_seconds)
+        else:
+            # Unreadable audio is not worth guessing at: render it silent
+            # rather than muxing a track of unknown length under a timeline
+            # built for a different one.
+            voice_path = None
+
+    filter_complex, main_duration = _build_filter_complex(n, clip_dur)
+    hold_seconds = clip_dur + XFADE_DUR
+    # The end-card absorbs whatever the photos could not: with few photos and a
+    # long script the per-photo hold hits VOICE_MAX_CLIP_DUR and the voice is
+    # still talking, so the card holds until it finishes. -t only ever cuts, so
+    # without this the last words would be clipped off — the one failure a
+    # narrated reel must not have.
+    outro_seconds = OUTRO_DUR
+    if voice_seconds is not None:
+        outro_seconds = max(OUTRO_DUR, voice_seconds + VOICE_TAIL - main_duration)
+    total_duration = main_duration + outro_seconds
 
     cmd = ["ffmpeg", "-y"]
     for p in frame_paths:
         cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{hold_seconds:.3f}", "-i", str(p)]
     cmd += ["-loop", "1", "-i", str(overlay_path)]  # input n: the branded overlay PNG
-    cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{OUTRO_DUR:.3f}", "-i", str(outro_path)]  # input n+1: end-card
-    cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]  # input n+2: silent audio
+    cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{outro_seconds:.3f}", "-i", str(outro_path)]  # input n+1: end-card
+    audio_idx = n + 2
+    if voice_path is not None:
+        cmd += ["-i", str(voice_path)]  # input n+2: narration
+    else:
+        cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]  # input n+2: silent audio
 
     outro_idx = n + 1
     filter_complex += (
         f";\n[{outro_idx}:v]fps={FPS},setsar=1[outro_z]"
         f";\n[main_out][outro_z]concat=n=2:v=1:a=0[vout]"
     )
+    if voice_path is not None:
+        # apad fills the end-card's three seconds with silence instead of
+        # letting the audio stream simply stop, which some players show as a
+        # truncated file. -shortest is dropped for the same reason: with a
+        # finite audio input it would cut the video at the last spoken word.
+        filter_complex += f";\n[{audio_idx}:a]apad[aout]"
 
     cmd += [
         "-filter_complex", filter_complex,
         "-map", "[vout]",
-        "-map", f"{n + 2}:a",
+        "-map", "[aout]" if voice_path is not None else f"{audio_idx}:a",
         "-t", f"{total_duration:.3f}",
         "-c:v", "libx264", "-profile:v", "main", "-pix_fmt", "yuv420p", "-r", str(FPS),
-        "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart",
+        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
         str(out_path),
     ]
+    if voice_path is None:
+        cmd.insert(-1, "-shortest")
 
     result = subprocess.run(cmd, capture_output=True, timeout=180)
     if result.returncode != 0:
         raise ReelError(result.stderr.decode(errors="replace")[-2000:])
 
 
-def render_reel(photo_urls: list[str], fields: dict, workdir: Path) -> Path:
+def render_reel(photo_urls: list[str], fields: dict, workdir: Path, voice_path: Path | None = None) -> Path:
     """Download photos, build story frames + overlay, render the MP4 into
     workdir, return its path. Raises ReelError on any unrecoverable failure."""
     workdir.mkdir(parents=True, exist_ok=True)
@@ -447,5 +525,5 @@ def render_reel(photo_urls: list[str], fields: dict, workdir: Path) -> Path:
         frame_paths.append(dest)
 
     out_path = workdir / "reel.mp4"
-    _run_ffmpeg(frame_paths, overlay_path, outro_path, out_path)
+    _run_ffmpeg(frame_paths, overlay_path, outro_path, out_path, voice_path)
     return out_path
